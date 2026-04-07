@@ -21,6 +21,7 @@ htmlcov/
 
 *.db
 *.sqlite3
+*.log
 
 data/processed/*
 !data/processed/.gitkeep

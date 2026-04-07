@@ -12,7 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """All configurable knobs for the Career Intelligence backend.
 
-    Values are read from a `.env` file (if present) then overridden by
+    Values are read from a ``.env`` file (if present) then overridden by
     real environment variables.  Secrets use ``SecretStr`` so they never
     appear in repr/logs.
     """
@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     admin_secret: SecretStr = SecretStr("change-me-in-production")
     rate_limit_rpm: int = 30
     max_input_length: int = 4000
+    max_cv_file_bytes: int = 5 * 1024 * 1024  # 5 MB
 
     # --- App ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"

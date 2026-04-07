@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from langchain_openai import ChatOpenAI
 
 from career_intel.config import Settings, get_settings
+from career_intel.llm import get_chat_llm
 from career_intel.rag.retriever import retrieve_chunks
 from career_intel.schemas.domain import LearningPlanInput, LearningPlanOutput
 
@@ -67,11 +67,7 @@ async def run_learning_plan(
         for i, c in enumerate(chunks)
     ]
 
-    llm = ChatOpenAI(
-        model=settings.openai_model,
-        api_key=settings.openai_api_key.get_secret_value(),
-        temperature=0.2,
-    )
+    llm = get_chat_llm(settings, temperature=0.2)
 
     prompt = PLAN_PROMPT.format(
         context=context,

@@ -45,18 +45,24 @@ async def rewrite_query(query: str, settings: Settings | None = None) -> str:
     return rewritten
 
 
+_MIN_RELEVANCE_SCORE = 0.20
+_CONTEXT_WINDOW_LIMIT = 6
+
+
 async def retrieve_chunks(
     query: str,
     filters: dict[str, Any] | None = None,
     settings: Settings | None = None,
-    top_k: int = 20,
-    score_threshold: float = 0.0,
+    top_k: int = 12,
+    score_threshold: float = _MIN_RELEVANCE_SCORE,
 ) -> list[RetrievedChunk]:
     """Embed query variants and retrieve relevant chunks from Qdrant.
 
     Strategy:
     - Retrieve using both rewritten and normalized-original variants.
     - Merge by point ID using max score.
+    - Filter below ``score_threshold`` (default 0.20) to exclude junk.
+    - Deduplicate by normalized text fingerprint.
     - If filters return zero hits, fall back to unfiltered retrieval.
     """
     if settings is None:
@@ -75,21 +81,24 @@ async def retrieve_chunks(
         filter_fallback_used = True
 
     chunks: list[RetrievedChunk] = []
-    seen_texts: set[str] = set()
+    seen_fingerprints: set[str] = set()
+    skipped_low_score = 0
+    skipped_duplicate = 0
 
     for point in scored_points:
         score = point.score if hasattr(point, "score") else 0.0
         if score < score_threshold:
+            skipped_low_score += 1
             continue
 
         payload = point.payload or {}
         text = payload.get("text", "")
 
-        # Deduplicate near-identical chunks
-        text_fingerprint = text[:200]
-        if text_fingerprint in seen_texts:
+        fingerprint = _text_fingerprint(text)
+        if fingerprint in seen_fingerprints:
+            skipped_duplicate += 1
             continue
-        seen_texts.add(text_fingerprint)
+        seen_fingerprints.add(fingerprint)
 
         metadata = ChunkMetadata(
             source_id=payload.get("source_id", ""),
@@ -113,8 +122,7 @@ async def retrieve_chunks(
             score=score,
         ))
 
-    # Keep top N for context window
-    chunks = chunks[:8]
+    chunks = chunks[:_CONTEXT_WINDOW_LIMIT]
 
     logger.info(
         "retrieval_complete",
@@ -124,18 +132,29 @@ async def retrieve_chunks(
         filters_applied=bool(filters),
         filter_fallback_used=filter_fallback_used,
         total_hits=len(scored_points),
+        skipped_low_score=skipped_low_score,
+        skipped_duplicate=skipped_duplicate,
         returned=len(chunks),
         top_score=chunks[0].score if chunks else 0.0,
-        top_chunk_ids=[c.chunk_id for c in chunks[:5]],
         top_scores=[round(c.score, 4) for c in chunks[:5]],
     )
     return chunks
 
 
+def _text_fingerprint(text: str) -> str:
+    """Create a normalized fingerprint for deduplication.
+
+    Strips whitespace variation so chunks with identical content
+    but different formatting are detected as duplicates.
+    """
+    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    return normalized[:300]
+
+
 def normalize_query(query: str) -> str:
     """Normalize user query variants to improve retrieval stability."""
     text = query.strip()
-    text = text.replace("–", "-").replace("—", "-")
+    text = text.replace("\u2013", "-").replace("\u2014", "-")
     text = re.sub(r"\((\d{4})\s*-\s*(\d{4})\)", r"\1 to \2", text)
     text = re.sub(r"(\d{4})\s*-\s*(\d{4})", r"\1 to \2", text)
     text = re.sub(r"[“”\"'`]", "", text)

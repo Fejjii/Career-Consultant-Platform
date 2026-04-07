@@ -1,38 +1,52 @@
 [
   {
+    "query": "hello",
+    "expected_chunk_ids": [],
+    "expected_citations": [],
+    "expected_behaviour": "small_talk",
+    "tags": ["small_talk", "greeting", "no_retrieval"]
+  },
+  {
+    "query": "thanks for your help",
+    "expected_chunk_ids": [],
+    "expected_citations": [],
+    "expected_behaviour": "small_talk",
+    "tags": ["small_talk", "acknowledgement", "no_retrieval"]
+  },
+  {
     "query": "What are the top growing roles for 2025-2030?",
     "expected_chunk_ids": [],
     "expected_citations": [],
     "expected_behaviour": "cite_source",
-    "tags": ["retrieval", "growing_roles"]
+    "tags": ["retrieval_required", "growing_roles"]
   },
   {
     "query": "What skills does a data analyst need?",
     "expected_chunk_ids": [],
     "expected_citations": [],
     "expected_behaviour": "cite_source",
-    "tags": ["retrieval", "skills", "data_analyst"]
+    "tags": ["retrieval_required", "skills", "data_analyst"]
   },
   {
     "query": "Compare product manager vs program manager",
     "expected_chunk_ids": [],
     "expected_citations": [],
     "expected_behaviour": "use_tool:role_compare",
-    "tags": ["tool_calling", "comparison"]
+    "tags": ["tool_required", "comparison"]
   },
   {
     "query": "I know Python and SQL — what gaps do I have for an ML engineer role?",
     "expected_chunk_ids": [],
     "expected_citations": [],
     "expected_behaviour": "use_tool:skill_gap",
-    "tags": ["tool_calling", "skill_gap"]
+    "tags": ["tool_required", "skill_gap"]
   },
   {
     "query": "Create a 3-month learning plan to become a data analyst",
     "expected_chunk_ids": [],
     "expected_citations": [],
     "expected_behaviour": "use_tool:learning_plan",
-    "tags": ["tool_calling", "learning_plan"]
+    "tags": ["tool_required", "learning_plan"]
   },
   {
     "query": "What is the exact salary for a data scientist in New York?",
@@ -53,7 +67,7 @@
     "expected_chunk_ids": [],
     "expected_citations": [],
     "expected_behaviour": "cite_source",
-    "tags": ["retrieval", "skills", "cognitive"]
+    "tags": ["retrieval_required", "skills", "cognitive"]
   },
   {
     "query": "Tell me about quantum computing careers in Antarctica",
@@ -67,6 +81,20 @@
     "expected_chunk_ids": [],
     "expected_citations": [],
     "expected_behaviour": "cite_source",
-    "tags": ["retrieval", "career_path", "ml_engineer"]
+    "tags": ["retrieval_required", "career_path", "ml_engineer"]
+  },
+  {
+    "query": "What skills am I missing for AI roles?",
+    "expected_chunk_ids": [],
+    "expected_citations": [],
+    "expected_behaviour": "use_cv",
+    "tags": ["retrieval_required", "cv_relevant", "skill_gap"]
+  },
+  {
+    "query": "Improve my CV for consulting positions",
+    "expected_chunk_ids": [],
+    "expected_citations": [],
+    "expected_behaviour": "use_cv",
+    "tags": ["retrieval_required", "cv_relevant", "cv_improvement"]
   }
 ]

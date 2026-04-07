@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
@@ -24,6 +23,12 @@ class ChatRequest(BaseModel):
     filters: dict[str, Any] | None = Field(
         default=None,
         description="Optional metadata filters passed to retrieval (e.g. year, source_type).",
+    )
+    cv_text: str | None = Field(
+        default=None,
+        max_length=50_000,
+        description="Pre-processed CV/resume text. Included in context only when the "
+        "router determines the query benefits from personalisation.",
     )
 
 
@@ -51,6 +56,10 @@ class ChatResponse(BaseModel):
     reply: str
     citations: list[Citation] = Field(default_factory=list)
     tool_calls: list[ToolCallResult] = Field(default_factory=list)
+    intent: str | None = Field(
+        default=None,
+        description="Router intent classification (small_talk, direct_answer, retrieval_required, tool_required).",
+    )
     trace_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

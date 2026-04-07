@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
+import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -14,6 +13,16 @@ logger = structlog.get_logger()
 
 DEFAULT_CHUNK_SIZE = 1000  # tokens (approximate via chars / 4)
 DEFAULT_OVERLAP = 150
+
+
+def _content_uuid(text: str) -> str:
+    """Generate a deterministic UUID string from text content.
+
+    Qdrant point IDs must be either an integer or a UUID-format string.
+    We use UUID5 (SHA-1 based, deterministic) so the same chunk text
+    always produces the same ID, enabling idempotent re-ingestion.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, text))
 
 
 @dataclass
@@ -26,7 +35,7 @@ class RawChunk:
 
     def __post_init__(self) -> None:
         if not self.chunk_id:
-            self.chunk_id = hashlib.sha256(self.text.encode()).hexdigest()[:16]
+            self.chunk_id = _content_uuid(self.text)
 
 
 def chunk_markdown(
@@ -48,13 +57,20 @@ def chunk_markdown(
         if section_title:
             section_meta["section"] = section_title
 
+        clean_section_text = section_text.strip()
+        if not clean_section_text:
+            continue
+
         if _approx_tokens(section_text) <= chunk_size:
-            chunks.append(RawChunk(text=section_text.strip(), metadata=section_meta))
+            chunks.append(RawChunk(text=clean_section_text, metadata=section_meta))
         else:
             sub_chunks = _split_by_size(section_text, chunk_size, overlap)
             for idx, sc in enumerate(sub_chunks):
+                clean_sub_chunk = sc.strip()
+                if not clean_sub_chunk:
+                    continue
                 chunk_meta = {**section_meta, "chunk_index": idx}
-                chunks.append(RawChunk(text=sc.strip(), metadata=chunk_meta))
+                chunks.append(RawChunk(text=clean_sub_chunk, metadata=chunk_meta))
 
     for i, c in enumerate(chunks):
         c.metadata.setdefault("chunk_index", i)

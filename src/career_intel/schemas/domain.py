@@ -1,12 +1,11 @@
-"""Domain models for RAG chunks, tools, and evaluation."""
+"""Domain models for RAG chunks, tools, evaluation, and routing."""
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # RAG / Ingestion
@@ -37,7 +36,7 @@ class DocumentRecord(BaseModel):
     checksum: str
     source_type: str
     license: str | None = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class RetrievedChunk(BaseModel):
@@ -93,6 +92,66 @@ class LearningPlanOutput(BaseModel):
     milestones: list[dict[str, Any]]
     resources: list[dict[str, Any]]
     citations: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
+
+class RouterDecision(BaseModel):
+    """Intent-first output of the LLM query router.
+
+    The ``intent`` field is the primary axis — it describes *what the user
+    wants*.  ``tool_name`` is secondary and only populated when the intent
+    actually requires a tool.
+    """
+
+    intent: Literal[
+        "small_talk",
+        "direct_answer",
+        "retrieval_required",
+        "tool_required",
+    ] = Field(
+        description="High-level classification of the user's goal.",
+    )
+    confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Router's self-assessed confidence in this classification.",
+    )
+    tool_name: str | None = Field(
+        default=None,
+        description="Tool to invoke (only when intent == 'tool_required').",
+    )
+    params: dict[str, Any] = Field(default_factory=dict)
+    use_cv: bool = Field(
+        default=False,
+        description="Whether the user's CV should be included in context.",
+    )
+    reason: str = Field(
+        default="",
+        description="Short explanation of why this routing decision was made.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# CV Risk
+# ---------------------------------------------------------------------------
+
+class CVRiskScore(BaseModel):
+    """Result of heuristic risk assessment on CV content."""
+
+    score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="0.0 = clean, 1.0 = almost certainly adversarial.",
+    )
+    matched_patterns: list[str] = Field(default_factory=list)
+    flagged: bool = Field(
+        default=False,
+        description="True if score exceeds the blocking threshold.",
+    )
 
 
 # ---------------------------------------------------------------------------

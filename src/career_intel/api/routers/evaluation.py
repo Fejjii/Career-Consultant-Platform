@@ -26,8 +26,6 @@ async def run_evaluation(
     logger.info("evaluation_run_triggered", trace_id=trace_id)
 
     from career_intel.evaluation.eval_runner import (
-        check_abstain_behaviour,
-        check_citation_integrity,
         load_golden_dataset,
     )
 

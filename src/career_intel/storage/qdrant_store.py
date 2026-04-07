@@ -52,7 +52,7 @@ def upsert_vectors(
 
     points = [
         models.PointStruct(id=uid, vector=vec, payload=pay)
-        for uid, vec, pay in zip(ids, vectors, payloads)
+        for uid, vec, pay in zip(ids, vectors, payloads, strict=True)
     ]
 
     client.upsert(

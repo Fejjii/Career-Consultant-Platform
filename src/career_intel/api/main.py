@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from career_intel.api.routers import chat, evaluation, feedback, health, ingest, metrics
+from career_intel.api.routers import chat, cv, evaluation, feedback, health, ingest, metrics
 from career_intel.config import get_settings
 from career_intel.logging import setup_logging
 
@@ -52,10 +53,12 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    rate_limited_prefixes = ("/chat", "/ingest", "/feedback")
+
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
-        """Apply rate limiting to mutating endpoints."""
-        if request.url.path in ("/chat", "/ingest", "/feedback"):
+        """Apply rate limiting to chat, ingest, and feedback endpoints."""
+        if any(request.url.path.startswith(p) for p in rate_limited_prefixes):
             try:
                 from career_intel.security.rate_limit import check_rate_limit
 
@@ -68,11 +71,17 @@ def create_app() -> FastAPI:
                     )
         return await call_next(request)
 
+    @app.get("/", tags=["meta"])
+    async def root() -> dict[str, str]:
+        return {"service": "AI Career Intelligence Assistant", "status": "ok"}
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
     @app.middleware("http")
     async def security_event_logging(request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
         """Log security-relevant events for all requests."""
-        import time
-
         start = time.monotonic()
         response: Response = await call_next(request)
         elapsed_ms = round((time.monotonic() - start) * 1000, 1)
@@ -90,6 +99,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(chat.router)
+    app.include_router(cv.router)
     app.include_router(ingest.router)
     app.include_router(feedback.router)
     app.include_router(evaluation.router)

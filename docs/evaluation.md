@@ -8,10 +8,12 @@ flowchart TD
   gold --> ansEval[Answer Eval]
   gold --> citeEval[Citation Integrity Eval]
   gold --> toolEval[Tool Schema Eval]
+  gold --> safetyEval[Safety and Injection Eval]
   retEval --> report[Eval Report]
   ansEval --> report
   citeEval --> report
   toolEval --> report
+  safetyEval --> report
   report --> ls[LangSmith Comparison — Optional]
 ```
 
@@ -19,11 +21,13 @@ flowchart TD
 
 | Dimension | Metrics | Method |
 |-----------|---------|--------|
-| Retrieval quality | nDCG@k, MRR | Gold query→chunk_id labels |
+| Retrieval quality | nDCG@k, MRR | Gold query-to-chunk_id labels |
 | Answer quality | Rubric-based LLM judge | Deterministic + LLM-as-judge |
-| Citation integrity | Precision/recall vs gold sources; cited_ids ⊆ retrieved_ids | Deterministic |
+| Citation integrity | Precision/recall vs gold sources; cited_ids subset of retrieved_ids | Deterministic |
 | Tool correctness | Schema validation, fixture-based expected outputs | Deterministic |
-| Safety | Injection resistance, refusal on unsupported claims | Deterministic |
+| Safety — injection | Heuristic, encoded, paraphrased, multilingual, base64 attack cases | Deterministic + moderation API |
+| Safety — refusal | "must refuse salary guarantee" cases, out-of-scope queries | Deterministic |
+| Streaming correctness | Full response matches non-streaming; SSE format valid | Integration tests |
 
 ## Golden dataset
 
@@ -43,6 +47,16 @@ Introduced alongside the RAG pipeline:
 - Citation integrity checks (cited IDs are subset of retrieved IDs)
 - Weak-evidence / abstain test cases
 - Run via `pytest tests/rag/`
+
+## Security evaluation test suite
+
+Located at `tests/security/test_injection.py`:
+- Direct injection (10+ heuristic patterns)
+- Paraphrased/synonymous injection attempts
+- Base64-encoded instruction injection
+- Unicode BiDi character injection
+- Zero-width character sequence detection
+- Legitimate career queries that must NOT be flagged (false-positive regression)
 
 ## Evolving toward RAGAs / TruLens
 

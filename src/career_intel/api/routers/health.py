@@ -8,7 +8,12 @@ import structlog
 from fastapi import APIRouter
 
 from career_intel.config import get_settings
-from career_intel.schemas.api import HealthResponse, ReadyDetail, ReadyResponse, SystemStatusResponse
+from career_intel.schemas.api import (
+    HealthResponse,
+    ReadyDetail,
+    ReadyResponse,
+    SystemStatusResponse,
+)
 
 router = APIRouter(tags=["health"])
 logger = structlog.get_logger()
@@ -58,8 +63,8 @@ async def readiness() -> ReadyResponse:
 
     # --- Postgres ---
     try:
+        from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine
-        from sqlalchemy.text import text
 
         t0 = time.monotonic()
         engine = create_async_engine(settings.postgres_dsn, pool_pre_ping=True)
