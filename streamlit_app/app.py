@@ -85,12 +85,21 @@ from youtube_service import fetch_youtube_suggestions, should_fetch_youtube_supp
 import streamlit as st
 
 
+def _streamlit_secrets() -> dict[str, object]:
+    """Return Streamlit secrets safely, even when no secrets file exists."""
+    try:
+        return dict(st.secrets)
+    except Exception:
+        return {}
+
+
 def _hydrate_runtime_env_from_streamlit_secrets() -> None:
     """Expose selected Streamlit secrets as env vars for shared backend code."""
+    secrets = _streamlit_secrets()
     for name in ("OPENAI_API_KEY", "QDRANT_URL", "QDRANT_API_KEY"):
         if (os.getenv(name) or "").strip():
             continue
-        secret_value = str(st.secrets.get(name, "")).strip()
+        secret_value = str(secrets.get(name, "")).strip()
         if secret_value:
             os.environ[name] = secret_value
 
@@ -1905,7 +1914,7 @@ def _get_source_inventory() -> dict | None:
 
 def _retrieval_config_message() -> str | None:
     """Return retrieval config warning for the UI when config is incomplete."""
-    resolved = resolve_qdrant_config(secrets=st.secrets)
+    resolved = resolve_qdrant_config(secrets=_streamlit_secrets())
     return None if resolved.retrieval_available else resolved.message
 
 
@@ -1934,7 +1943,7 @@ def _resolved_openai_key() -> str | None:
     user_key = ""
     if _active_credential_source() == USER_BYOK_SOURCE:
         user_key = _canonical_user_openai_key()
-    resolved = resolve_openai_api_key(user_api_key=user_key, secrets=st.secrets)
+    resolved = resolve_openai_api_key(user_api_key=user_key, secrets=_streamlit_secrets())
     return resolved.api_key
 
 
@@ -1943,13 +1952,13 @@ def _credential_source_label() -> str:
     user_key = ""
     if _active_credential_source() == USER_BYOK_SOURCE:
         user_key = _canonical_user_openai_key()
-    resolved = resolve_openai_api_key(user_api_key=user_key, secrets=st.secrets)
+    resolved = resolve_openai_api_key(user_api_key=user_key, secrets=_streamlit_secrets())
     return resolved.source_label
 
 
 def _app_managed_key_available() -> bool:
     """Return True when non-BYOK app-managed key is configured."""
-    resolved = resolve_openai_api_key(user_api_key=None, secrets=st.secrets)
+    resolved = resolve_openai_api_key(user_api_key=None, secrets=_streamlit_secrets())
     return bool(resolved.api_key)
 
 
@@ -2852,6 +2861,13 @@ with st.sidebar:
             if st.button("Validate key", use_container_width=True):
                 _sync_user_openai_key_from_input()
                 input_key = _canonical_user_openai_key()
+                _frontend_log(
+                    "byok_validation_attempt",
+                    input_present=bool(str(st.session_state.get("byok_api_key_input", "")).strip()),
+                    canonical_key_present=bool(input_key),
+                    active_source_before=_active_credential_source(),
+                    direct_mode=STREAMLIT_DIRECT_MODE,
+                )
                 if not input_key:
                     st.session_state.byok_last_validation_error = "Enter an API key before validation."
                     _frontend_log(
@@ -2918,6 +2934,12 @@ with st.sidebar:
                             selector_reconciled_reason="validate_success"
                             if transition.byok_validated
                             else "validate_failed",
+                        )
+                        _frontend_log(
+                            "byok_validation_result",
+                            validated=transition.byok_validated,
+                            canonical_key_present=bool(_canonical_user_openai_key()),
+                            active_source_after=_active_credential_source(),
                         )
                     except httpx.HTTPStatusError as exc:
                         st.session_state.byok_last_validation_error = _friendly_http_error(exc)

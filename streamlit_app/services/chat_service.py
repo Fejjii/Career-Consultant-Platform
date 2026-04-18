@@ -255,13 +255,74 @@ class DirectChatService:
         model: str | None,
         api_key: str | None,
     ) -> dict[str, Any]:
-        from career_intel.api.routers.health import provider_auth_status
-
         self._validate_or_raise(validator="llm", api_key=api_key)
         settings = self._get_settings(api_key_fallback=api_key)
         with _llm_override_context(settings=settings, model=model, api_key=api_key):
-            status = await provider_auth_status()
-        return status.model_dump()
+            from career_intel.api.routers.health import (
+                _availability_reason,
+                _normalize_accessible_chat_models,
+            )
+            from career_intel.llm.clients import (
+                get_async_openai_client,
+                get_supported_chat_models,
+                resolve_chat_model,
+            )
+
+            resolved_model = resolve_chat_model(settings)
+            supported_models = get_supported_chat_models(settings)
+            try:
+                client = get_async_openai_client(settings, timeout_seconds=8.0)
+                page = await client.models.list()
+                accessible_models = sorted({item.id for item in page.data if getattr(item, "id", None)})
+                normalized_accessible_models, ignored_accessible_models = _normalize_accessible_chat_models(
+                    accessible_models
+                )
+                selectable_models = list(normalized_accessible_models)
+                supported_but_unavailable = [
+                    item for item in supported_models if item not in normalized_accessible_models
+                ]
+                accessible_but_unsupported = [
+                    item for item in normalized_accessible_models if item not in supported_models
+                ]
+                model_unavailability_reasons = {
+                    model_id: _availability_reason(
+                        model_id=model_id,
+                        normalized_accessible_models=normalized_accessible_models,
+                        supported_models=supported_models,
+                        selectable_models=selectable_models,
+                    )
+                    for model_id in sorted(set(supported_models + normalized_accessible_models))
+                }
+                message = (
+                    "Credentials are valid and supported models were loaded for this key."
+                    if selectable_models
+                    else (
+                        "Credentials are valid, but this key cannot access any models currently supported "
+                        "by the app."
+                    )
+                )
+                return {
+                    "ok": True,
+                    "model": resolved_model,
+                    "message": message,
+                    "supported_models": supported_models,
+                    "accessible_models": accessible_models,
+                    "normalized_accessible_models": normalized_accessible_models,
+                    "selectable_models": selectable_models,
+                    "supported_but_unavailable_models": supported_but_unavailable,
+                    "accessible_but_unsupported_models": accessible_but_unsupported,
+                    "ignored_accessible_models": ignored_accessible_models,
+                    "model_unavailability_reasons": model_unavailability_reasons,
+                    "validation_stage": "model_catalog_loaded",
+                }
+            except Exception:
+                return {
+                    "ok": False,
+                    "model": resolved_model,
+                    "message": "Provider authentication failed. Check the selected key and model.",
+                    "supported_models": supported_models,
+                    "validation_stage": "provider_authentication",
+                }
 
     async def get_system_status(self) -> dict[str, Any]:
         retrieval_error = validate_retrieval_config()
