@@ -37,6 +37,10 @@ from model_config import (
     summarize_model_availability,
 )
 from security_controls import apply_session_rate_limit, inspect_prompt, validate_uploaded_file
+try:
+    from streamlit_app.runtime_config import resolve_openai_api_key, resolve_qdrant_config
+except ImportError:  # pragma: no cover - supports `streamlit run streamlit_app/app.py`
+    from runtime_config import resolve_openai_api_key, resolve_qdrant_config
 from sources_panel import (
     family_icon_html,
     family_section_title,
@@ -79,6 +83,19 @@ from usage_tracking import build_message_usage_fields, estimate_request_usage, u
 from youtube_service import fetch_youtube_suggestions, should_fetch_youtube_support
 
 import streamlit as st
+
+
+def _hydrate_runtime_env_from_streamlit_secrets() -> None:
+    """Expose selected Streamlit secrets as env vars for shared backend code."""
+    for name in ("OPENAI_API_KEY", "QDRANT_URL", "QDRANT_API_KEY"):
+        if (os.getenv(name) or "").strip():
+            continue
+        secret_value = str(st.secrets.get(name, "")).strip()
+        if secret_value:
+            os.environ[name] = secret_value
+
+
+_hydrate_runtime_env_from_streamlit_secrets()
 
 STREAMLIT_DIRECT_MODE = is_direct_mode_enabled()
 API_BASE = os.getenv("CAREER_INTEL_API_BASE_URL", "").strip().rstrip("/")
@@ -1885,6 +1902,12 @@ def _get_source_inventory() -> dict | None:
         return None
 
 
+def _retrieval_config_message() -> str | None:
+    """Return retrieval config warning for the UI when config is incomplete."""
+    resolved = resolve_qdrant_config(secrets=st.secrets)
+    return None if resolved.retrieval_available else resolved.message
+
+
 def _active_credential_source() -> str:
     source = str(st.session_state.get("active_credential_source", APP_MANAGED_SOURCE))
     validated = str(st.session_state.get("validated_byok_api_key", ""))
@@ -1894,11 +1917,32 @@ def _active_credential_source() -> str:
     return resolved
 
 
-def _active_request_api_key() -> str | None:
+def _resolved_openai_key() -> str | None:
+    """Resolve request key with user BYOK priority over app-managed key."""
+    user_key = ""
     if _active_credential_source() == USER_BYOK_SOURCE:
-        key = str(st.session_state.get("validated_byok_api_key", "")).strip()
-        return key or None
-    return None
+        user_key = str(st.session_state.get("validated_byok_api_key", "")).strip()
+    resolved = resolve_openai_api_key(user_api_key=user_key, secrets=st.secrets)
+    return resolved.api_key
+
+
+def _credential_source_label() -> str:
+    """Human-readable credential source label for sidebar status."""
+    user_key = ""
+    if _active_credential_source() == USER_BYOK_SOURCE:
+        user_key = str(st.session_state.get("validated_byok_api_key", "")).strip()
+    resolved = resolve_openai_api_key(user_api_key=user_key, secrets=st.secrets)
+    return resolved.source_label
+
+
+def _app_managed_key_available() -> bool:
+    """Return True when non-BYOK app-managed key is configured."""
+    resolved = resolve_openai_api_key(user_api_key=None, secrets=st.secrets)
+    return bool(resolved.api_key)
+
+
+def _active_request_api_key() -> str | None:
+    return _resolved_openai_key()
 
 
 def _current_auth_status() -> dict | None:
@@ -1946,12 +1990,22 @@ def _sync_app_key_model_catalog() -> None:
 
     if st.session_state.get("app_provider_auth_status"):
         return
+    if not _app_managed_key_available():
+        st.session_state.app_provider_auth_status = {
+            "ok": False,
+            "message": (
+                "No app-managed OpenAI key is configured. "
+                "Add your OpenAI API key in the sidebar or configure OPENAI_API_KEY in Streamlit secrets."
+            ),
+            "selectable_models": get_supported_model_ids(),
+        }
+        return
     try:
         result = discover_provider_models(
             api_base=API_BASE,
             session_id=st.session_state.session_id,
             model=st.session_state.selected_model,
-            api_key=None,
+            api_key=_resolved_openai_key(),
         )
         st.session_state.app_provider_auth_status = result
         summary = summarize_model_availability(result)
@@ -2363,6 +2417,10 @@ def _render_sources_panel() -> None:
         )
         if source_inventory.get("esco_status_note"):
             st.caption(str(source_inventory["esco_status_note"]))
+    else:
+        retrieval_config_message = _retrieval_config_message()
+        if retrieval_config_message:
+            st.caption(retrieval_config_message)
     cites = [c for c in (st.session_state.get("citations") or []) if isinstance(c, dict)]
     yt_raw = st.session_state.get("youtube_suggestions") or []
     yt_videos = [v for v in yt_raw if isinstance(v, dict)]
@@ -2875,7 +2933,7 @@ with st.sidebar:
         auth_status = _current_auth_status()
         credential_source = _active_credential_source()
         st.markdown(
-            f'<p class="ci-side-key-status">Key source: {"Your validated key" if credential_source == USER_BYOK_SOURCE else "App managed key"}</p>',
+            f'<p class="ci-side-key-status">Key source: {_credential_source_label()}</p>',
             unsafe_allow_html=True,
         )
         if st.session_state.get("byok_status_notice"):

@@ -290,6 +290,20 @@ This repo supports **single-deployment Streamlit mode**: the UI executes backend
 - Speech transcription: `OPENAI_API_KEY`
 - Optional external backend mode only: `CAREER_INTEL_API_BASE_URL` (when `STREAMLIT_DIRECT_MODE=false`)
 
+### OpenAI key resolution order
+
+At runtime, the app resolves OpenAI credentials in this order:
+1. Validated user key from the sidebar (BYOK)
+2. Streamlit secret `OPENAI_API_KEY`
+3. Environment variable `OPENAI_API_KEY`
+
+If none are available, the app stays up and shows an actionable message in the UI.
+
+### Retrieval config notes
+
+- `QDRANT_URL` is required to enable retrieval.
+- `QDRANT_API_KEY` is required for managed/cloud Qdrant endpoints and optional for local instances.
+
 ### Optional external backend mode
 
 If you intentionally run Streamlit against a separate FastAPI backend:

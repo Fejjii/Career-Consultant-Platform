@@ -6,7 +6,6 @@ This module lets the Streamlit app reuse backend orchestration without HTTP.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
+
+try:
+    from streamlit_app.runtime_config import resolve_openai_api_key, resolve_qdrant_config
+except ImportError:  # pragma: no cover - supports `streamlit run streamlit_app/app.py`
+    from runtime_config import resolve_openai_api_key, resolve_qdrant_config
 
 def _ensure_src_on_path() -> None:
     project_root = Path(__file__).resolve().parents[2]
@@ -65,19 +69,20 @@ def _settings_validation_message(exc: Exception) -> str:
 
 def validate_llm_config(*, api_key_override: str | None = None) -> str | None:
     """Validate chat generation configuration and return an actionable message."""
-    if (api_key_override or "").strip():
+    resolved = resolve_openai_api_key(user_api_key=api_key_override)
+    if resolved.api_key:
         return None
-    if (os.getenv("OPENAI_API_KEY") or "").strip():
-        return None
-    return "Missing required secret: OPENAI_API_KEY"
+    return (
+        "Add your OpenAI API key in the sidebar or configure OPENAI_API_KEY in Streamlit secrets."
+    )
 
 
 def validate_retrieval_config() -> str | None:
     """Validate retrieval configuration and return an actionable message."""
-    qdrant_url = (os.getenv("QDRANT_URL") or "").strip()
-    if qdrant_url:
+    resolved = resolve_qdrant_config()
+    if resolved.retrieval_available:
         return None
-    return "Qdrant configuration is missing, so retrieval is unavailable right now. Set QDRANT_URL."
+    return resolved.message
 
 
 def validate_speech_config(*, api_key_override: str | None = None) -> str | None:
