@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
@@ -18,7 +21,10 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(
+            str(_PROJECT_ROOT / ".env"),
+            ".env",
+        ),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -86,6 +92,22 @@ class Settings(BaseSettings):
 
 
 @lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    """Return a cached singleton ``Settings`` instance."""
+def _get_base_settings() -> Settings:
+    """Return cached app-managed settings loaded from env or .env."""
     return Settings()  # type: ignore[call-arg]
+
+
+def get_settings() -> Settings:
+    """Return settings, honoring any request-scoped BYOK override.
+
+    Direct-mode Streamlit requests can carry a user API key without an app-managed
+    `OPENAI_API_KEY`. When a request-scoped override is present, build a fresh
+    settings object for that request so any nested `get_settings()` calls inherit
+    the active BYOK instead of failing validation.
+    """
+    from career_intel.llm.request_context import get_request_api_key_override
+
+    override_key = (get_request_api_key_override() or "").strip()
+    if override_key:
+        return Settings(openai_api_key=SecretStr(override_key))  # type: ignore[call-arg]
+    return _get_base_settings()

@@ -49,8 +49,8 @@ def _extract_missing_setting_names(exc: Exception) -> list[str]:
         return []
     missing: list[str] = []
     for err in exc.errors():
-        err_type = str(err.get("type", ""))
-        if err_type != "missing":
+        err_type = str(err.get("type", "")).lower()
+        if "missing" not in err_type:
             continue
         loc = err.get("loc") or ()
         if not loc:
@@ -64,7 +64,11 @@ def _extract_missing_setting_names(exc: Exception) -> list[str]:
 def _settings_validation_message(exc: Exception) -> str:
     missing = _extract_missing_setting_names(exc)
     if missing:
-        return "Missing required secret(s): " + ", ".join(missing)
+        return (
+            "Missing required configuration: "
+            + ", ".join(missing)
+            + ". Set these in Streamlit secrets, environment variables, or the repo .env, then restart."
+        )
     return f"Configuration is invalid: {exc}"
 
 
@@ -73,8 +77,16 @@ def validate_llm_config(*, api_key_override: str | None = None) -> str | None:
     resolved = resolve_openai_api_key(user_api_key=api_key_override)
     if resolved.api_key:
         return None
+    try:
+        backend_settings = get_settings()
+        if backend_settings.openai_api_key.get_secret_value().strip():
+            return None
+    except Exception:
+        # Fall through to the actionable message below.
+        pass
     return (
-        "Add your OpenAI API key in the sidebar or configure OPENAI_API_KEY in Streamlit secrets."
+        "Add your OpenAI API key in the sidebar or configure OPENAI_API_KEY in Streamlit secrets, "
+        "environment variables, or the repo .env."
     )
 
 
@@ -111,24 +123,23 @@ class DirectChatService:
     """In-process adapter around backend pipeline entry points."""
 
     def __init__(self) -> None:
-        self._settings: Settings | None = None
+        self._base_settings: Settings | None = None
 
     def _get_settings(self, *, api_key_fallback: str | None = None) -> Settings:
-        if self._settings is not None:
-            return self._settings
-        try:
-            self._settings = get_settings()
-        except Exception as exc:
-            missing = set(_extract_missing_setting_names(exc))
-            fallback_key = (api_key_fallback or "").strip()
-            if "OPENAI_API_KEY" in missing and fallback_key:
-                try:
-                    self._settings = Settings(openai_api_key=fallback_key)  # type: ignore[call-arg]
-                except Exception as fallback_exc:
-                    raise DirectModeError(_settings_validation_message(fallback_exc)) from fallback_exc
-            else:
+        fallback_key = (api_key_fallback or "").strip()
+        if fallback_key:
+            try:
+                return Settings(openai_api_key=fallback_key)  # type: ignore[call-arg]
+            except Exception as exc:
                 raise DirectModeError(_settings_validation_message(exc)) from exc
-        return self._settings
+
+        if self._base_settings is not None:
+            return self._base_settings
+        try:
+            self._base_settings = get_settings()
+        except Exception as exc:
+            raise DirectModeError(_settings_validation_message(exc)) from exc
+        return self._base_settings
 
     def _validate_or_raise(
         self,
@@ -177,26 +188,30 @@ class DirectChatService:
         *,
         query: str,
         filters: dict[str, Any] | None,
+        api_key: str | None = None,
     ) -> list[RetrievedChunk]:
         from career_intel.rag.query_preprocessor import normalize_query_for_retrieval
         from career_intel.rag.retriever import retrieve_chunks, rewrite_query
 
         self._validate_or_raise(validator="retrieval")
-        settings = self._get_settings()
-        retrieval_context = await normalize_query_for_retrieval(query, settings=settings)
-        rewritten = await rewrite_query(retrieval_context.retrieval_query, settings=settings)
-        return await retrieve_chunks(query=rewritten, filters=filters, settings=settings)
+        settings = self._get_settings(api_key_fallback=api_key)
+        with _llm_override_context(settings=settings, model=None, api_key=api_key):
+            retrieval_context = await normalize_query_for_retrieval(query, settings=settings)
+            rewritten = await rewrite_query(retrieval_context.retrieval_query, settings=settings)
+            return await retrieve_chunks(query=rewritten, filters=filters, settings=settings)
 
     async def run_tool(
         self,
         *,
         decision: RouterDecision,
+        api_key: str | None = None,
     ) -> dict[str, Any]:
         from career_intel.tools.registry import execute_tool
 
-        settings = self._get_settings()
-        result = await execute_tool(decision, settings)
-        return result.model_dump()
+        settings = self._get_settings(api_key_fallback=api_key)
+        with _llm_override_context(settings=settings, model=None, api_key=api_key):
+            result = await execute_tool(decision, settings)
+            return result.model_dump()
 
     async def run_fallback(
         self,
@@ -372,8 +387,8 @@ class DirectChatService:
 
     async def process_cv_upload(self, *, filename: str, data: bytes) -> dict[str, Any]:
         max_bytes = 5 * 1024 * 1024
-        if self._settings is not None:
-            max_bytes = self._settings.max_cv_file_bytes
+        if self._base_settings is not None:
+            max_bytes = self._base_settings.max_cv_file_bytes
         try:
             cv_text = process_cv(
                 data,
@@ -477,15 +492,17 @@ def run_rag(
     *,
     query: str,
     filters: dict[str, Any] | None,
+    api_key: str | None = None,
 ) -> list[RetrievedChunk]:
-    return _run_async(_service().run_rag(query=query, filters=filters))
+    return _run_async(_service().run_rag(query=query, filters=filters, api_key=api_key))
 
 
 def run_tool(
     *,
     decision: RouterDecision,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
-    return _run_async(_service().run_tool(decision=decision))
+    return _run_async(_service().run_tool(decision=decision, api_key=api_key))
 
 
 def run_fallback(

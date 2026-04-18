@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlparse
+
+_LOCAL_QDRANT_DEFAULT_URL = "http://localhost:6333"
+_DOTENV_CACHE: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -37,7 +41,50 @@ def _secret_value(
         value = str(secrets.get(name, "")).strip()
         if value:
             return value
-    return (os.getenv(name) or "").strip()
+    env_value = (os.getenv(name) or "").strip()
+    if env_value:
+        return env_value
+    return _dotenv_value(name)
+
+
+def _dotenv_value(name: str) -> str:
+    dotenv_values = _load_dotenv_values()
+    return dotenv_values.get(name, "")
+
+
+def _load_dotenv_values() -> dict[str, str]:
+    global _DOTENV_CACHE
+    if _DOTENV_CACHE is not None:
+        return _DOTENV_CACHE
+
+    values: dict[str, str] = {}
+    for env_path in _dotenv_candidates():
+        if not env_path.exists():
+            continue
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            raw_key, raw_value = stripped.split("=", 1)
+            key = raw_key.strip()
+            if key.startswith("export "):
+                key = key[7:].strip()
+            if not key:
+                continue
+            value = raw_value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            if key not in values and value:
+                values[key] = value
+
+    _DOTENV_CACHE = values
+    return values
+
+
+def _dotenv_candidates() -> tuple[Path, Path]:
+    project_root_env = Path(__file__).resolve().parents[1] / ".env"
+    cwd_env = Path.cwd() / ".env"
+    return project_root_env, cwd_env
 
 
 def resolve_openai_api_key(
@@ -60,7 +107,7 @@ def resolve_openai_api_key(
                 source_label="App managed key",
             )
 
-    env_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    env_key = _secret_value("OPENAI_API_KEY")
     if env_key:
         return OpenAIKeyResolution(
             api_key=env_key,
@@ -83,15 +130,7 @@ def resolve_qdrant_config(
     secrets: Mapping[str, object] | None = None,
 ) -> QdrantConfigResolution:
     """Resolve Qdrant settings and return an actionable availability message."""
-    qdrant_url = _secret_value("QDRANT_URL", secrets=secrets)
-    if not qdrant_url:
-        return QdrantConfigResolution(
-            url=None,
-            api_key=None,
-            requires_api_key=False,
-            retrieval_available=False,
-            message="Retrieval unavailable because QDRANT_URL is not configured.",
-        )
+    qdrant_url = _secret_value("QDRANT_URL", secrets=secrets) or _LOCAL_QDRANT_DEFAULT_URL
 
     qdrant_api_key = _secret_value("QDRANT_API_KEY", secrets=secrets)
     requires_key = _qdrant_requires_api_key(qdrant_url)
