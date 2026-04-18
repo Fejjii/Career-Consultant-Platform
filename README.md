@@ -82,7 +82,7 @@ flowchart TB
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.11 or 3.12 (recommended: 3.11.9 for Cloud parity)
 - [uv](https://docs.astral.sh/uv/) package manager
 - Docker & Docker Compose (for Qdrant, Postgres, Redis)
 
@@ -258,6 +258,20 @@ sequenceDiagram
 - **Success:** `{ "text", "provider", "language", "duration_seconds", "warnings" }`.
 - **Errors:** `400` invalid/empty/corrupt, `413` too large, `422` empty transcript after normalization, `502` provider failure.
 - **Development:** response may include header `X-Transcription-Latency-Ms`.
+
+## Streamlit Community Cloud deployment
+
+This repo contains backend + evaluation dependencies in `pyproject.toml`. For deterministic Streamlit Cloud deploys, keep UI-only dependencies in `streamlit_app/requirements.txt` (next to the entrypoint).
+
+1. Ensure these files exist:
+   - `streamlit_app/requirements.txt` (UI-only deps used for Streamlit Cloud)
+   - `runtime.txt` at repo root (`python-3.11.9`)
+2. Keep the app directory free of conflicting dependency specs (no `pyproject.toml` / `uv.lock` inside `streamlit_app/`).
+3. In Streamlit Community Cloud, set **Main file path** to `streamlit_app/app.py`.
+4. Add required secrets in the app settings (for example `OPENAI_API_KEY` and API endpoint/base URL variables used by the UI).
+5. Redeploy (or reboot) after changing dependencies or runtime.
+
+If your API is hosted separately, verify the Streamlit app points to that reachable API URL instead of localhost.
 
 ## Documentation
 

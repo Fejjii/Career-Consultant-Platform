@@ -2,7 +2,7 @@
 name = "career-intel"
 version = "0.1.0"
 description = "AI Career Intelligence Assistant — RAG-powered career copilot"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
