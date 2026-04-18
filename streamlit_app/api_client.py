@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from services.chat_service import discover_provider_models as discover_provider_models_direct
+from services.chat_service import is_direct_mode_enabled
 
 OPENAI_API_KEY_HEADER = "X-OpenAI-API-Key"
 OPENAI_MODEL_HEADER = "X-OpenAI-Model"
@@ -42,6 +44,8 @@ def discover_provider_models(
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     """Ask the backend to discover models for the active credential source."""
+    if is_direct_mode_enabled():
+        return discover_provider_models_direct(model=model, api_key=api_key)
     response = httpx.get(
         f"{api_base}/health/provider-auth",
         headers=build_request_headers(session_id=session_id, model=model, api_key=api_key),

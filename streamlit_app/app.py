@@ -47,6 +47,13 @@ from sources_panel import (
     render_merged_card_html,
 )
 from speech_client import post_speech_transcribe
+from services.chat_service import (
+    generate_response as generate_response_direct,
+    get_source_inventory as get_source_inventory_direct,
+    get_system_status as get_system_status_direct,
+    is_direct_mode_enabled,
+    process_cv_upload as process_cv_upload_direct,
+)
 from speech_session import (
     SPEECH_SOURCE_MIC,
     SPEECH_SOURCE_UPLOAD,
@@ -72,7 +79,8 @@ from youtube_service import fetch_youtube_suggestions, should_fetch_youtube_supp
 
 import streamlit as st
 
-API_BASE = os.getenv("CAREER_INTEL_API_BASE_URL", "http://localhost:8000")
+STREAMLIT_DIRECT_MODE = is_direct_mode_enabled()
+API_BASE = os.getenv("CAREER_INTEL_API_BASE_URL", "").strip().rstrip("/")
 DEV_MODE = os.getenv("CAREER_INTEL_DEV_MODE", "").lower() in ("1", "true", "yes")
 logger = logging.getLogger(__name__)
 _LOCAL_TZ = datetime.now().astimezone().tzinfo
@@ -1655,6 +1663,28 @@ YOUTUBE_RATE_LIMIT_WINDOW_SECONDS = 60
 
 
 def _get_system_status() -> dict:
+    if STREAMLIT_DIRECT_MODE:
+        try:
+            return get_system_status_direct()
+        except Exception as exc:
+            return {
+                "backend": True,
+                "qdrant": False,
+                "indexed_data_present": False,
+                "collection": "unknown",
+                "points_count": 0,
+                "error": f"Direct mode failed: {exc}",
+            }
+
+    if not API_BASE:
+        return {
+            "backend": False,
+            "qdrant": False,
+            "indexed_data_present": False,
+            "collection": "unknown",
+            "points_count": 0,
+            "error": "External API mode requires CAREER_INTEL_API_BASE_URL.",
+        }
     try:
         resp = httpx.get(
             f"{API_BASE}/health/system",
@@ -1835,7 +1865,13 @@ def _activate_transcript(*, transcript: str, source: str, file_name: str) -> Non
 
 def _get_source_inventory() -> dict | None:
     """Fetch source coverage metadata for the UI side panel."""
-
+    if STREAMLIT_DIRECT_MODE:
+        try:
+            return get_source_inventory_direct()
+        except Exception:
+            return None
+    if not API_BASE:
+        return None
     try:
         resp = httpx.get(
             f"{API_BASE}/health/source-inventory",
@@ -1991,6 +2027,35 @@ def _response_meta_from_state(latency_ms: float) -> dict:
 
 
 def _call_non_streaming(body: dict) -> tuple[str, dict]:
+    if STREAMLIT_DIRECT_MODE:
+        try:
+            data = generate_response_direct(
+                body=body,
+                model=st.session_state.selected_model,
+                api_key=_active_request_api_key(),
+                user_timezone=_USER_TIMEZONE,
+            )
+            st.session_state.citations = data.get("citations", [])
+            st.session_state.tool_results = data.get("tool_calls", [])
+            st.session_state.last_intent = data.get("intent")
+            st.session_state.last_debug = {
+                "intent": data.get("intent"),
+                "retrieval_invoked": bool(data.get("citations")),
+                "sources_count": len(data.get("citations", [])),
+                "tool_invoked": bool(data.get("tool_calls")),
+                "mode": "direct",
+                "answer_source": data.get("answer_source"),
+                "answer_length": data.get("answer_length", "balanced"),
+            }
+            return data["reply"], {
+                "answer_source": data.get("answer_source"),
+                "provider_usage": data.get("usage"),
+            }
+        except Exception as exc:
+            return f"Unexpected error: {exc}", {"error": True}
+
+    if not API_BASE:
+        return "External API mode requires CAREER_INTEL_API_BASE_URL.", {"error": True}
     try:
         resp = httpx.post(
             f"{API_BASE}/chat",
@@ -2025,6 +2090,11 @@ def _call_non_streaming(body: dict) -> tuple[str, dict]:
 
 
 def _call_streaming(body: dict, placeholder) -> tuple[str, dict]:
+    if STREAMLIT_DIRECT_MODE:
+        reply, meta = _call_non_streaming(body)
+        placeholder.markdown(reply)
+        return reply, meta
+
     full_text = ""
     status_text = ""
     provider_usage: dict | None = None
@@ -2032,6 +2102,11 @@ def _call_streaming(body: dict, placeholder) -> tuple[str, dict]:
     st.session_state.tool_results = []
     st.session_state.last_intent = None
     st.session_state.last_debug = None
+
+    if not API_BASE:
+        message = "External API mode requires CAREER_INTEL_API_BASE_URL."
+        placeholder.markdown(message)
+        return message, {"error": True}
 
     try:
         with httpx.stream(
@@ -2419,14 +2494,19 @@ def _process_cv_upload(uploaded_cv) -> None:
 
     try:
         with st.spinner("Processing CV..."):
-            resp = httpx.post(
-                f"{API_BASE}/cv/process",
-                files={"file": (uploaded_cv.name, cv_bytes)},
-                headers=build_request_headers(session_id=st.session_state.session_id),
-                timeout=30.0,
-            )
-            resp.raise_for_status()
-            result = resp.json()
+            if STREAMLIT_DIRECT_MODE:
+                result = process_cv_upload_direct(filename=uploaded_cv.name, data=cv_bytes)
+            else:
+                if not API_BASE:
+                    raise RuntimeError("External API mode requires CAREER_INTEL_API_BASE_URL.")
+                resp = httpx.post(
+                    f"{API_BASE}/cv/process",
+                    files={"file": (uploaded_cv.name, cv_bytes)},
+                    headers=build_request_headers(session_id=st.session_state.session_id),
+                    timeout=30.0,
+                )
+                resp.raise_for_status()
+                result = resp.json()
         st.session_state.cv_text = result["cv_text"]
         st.session_state.cv_filename = result["filename"]
         st.session_state.cv_file_hash = file_hash
@@ -3235,7 +3315,7 @@ if message_to_send:
             text_placeholder = st.empty()
             request_started = time.perf_counter()
 
-            if not backend_ok:
+            if not backend_ok and not STREAMLIT_DIRECT_MODE:
                 reply = f"Backend unreachable at `{API_BASE}`."
                 _render_compact_error(reply, details=system_status.get("error"))
                 st.session_state.citations = []

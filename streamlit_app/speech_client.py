@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 from api_client import build_request_headers
+from services.chat_service import is_direct_mode_enabled, transcribe_audio as transcribe_audio_direct
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,16 @@ def post_speech_transcribe(
     timeout: float = 130.0,
 ) -> dict[str, Any]:
     """POST multipart audio to ``/speech/transcribe``. Raises ``httpx.HTTPError`` on failure."""
+    if is_direct_mode_enabled():
+        return transcribe_audio_direct(
+            file_name=filename,
+            content_type=content_type,
+            data=audio_bytes,
+            source=source,
+            model=model,
+            api_key=api_key,
+        )
+
     logger.info(
         "speech frontend stage=upload_request source=%s filename=%s content_type=%s bytes=%s",
         source,

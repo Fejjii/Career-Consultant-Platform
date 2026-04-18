@@ -105,15 +105,24 @@ docker compose up -d    # starts Qdrant, Postgres, Redis
 uv sync
 ```
 
-### 4. Run the API
+### 4. (Optional) Run the API
 
 ```bash
 uv run uvicorn career_intel.api.main:app --reload
 ```
 
-### 5. Run the Streamlit UI
+### 5. Run the Streamlit UI (default direct mode)
 
 ```bash
+uv run streamlit run streamlit_app/app.py
+```
+
+By default, the UI runs orchestration directly in-process (`STREAMLIT_DIRECT_MODE=true`).
+Use external API mode only when explicitly needed:
+
+```bash
+export STREAMLIT_DIRECT_MODE=false
+export CAREER_INTEL_API_BASE_URL=http://localhost:8000
 uv run streamlit run streamlit_app/app.py
 ```
 
@@ -261,17 +270,25 @@ sequenceDiagram
 
 ## Streamlit Community Cloud deployment
 
-This repo contains backend + evaluation dependencies in `pyproject.toml`. For deterministic Streamlit Cloud deploys, keep UI-only dependencies in `streamlit_app/requirements.txt` (next to the entrypoint).
+This repo supports **single-deployment Streamlit mode**: the UI executes backend orchestration in-process by default (`STREAMLIT_DIRECT_MODE=true`), so Streamlit Cloud does not require a separately reachable FastAPI service.
 
 1. Ensure these files exist:
-   - `streamlit_app/requirements.txt` (UI-only deps used for Streamlit Cloud)
+   - `streamlit_app/requirements.txt` (Streamlit + in-process backend runtime deps)
    - `runtime.txt` at repo root (`python-3.11.9`)
 2. Keep the app directory free of conflicting dependency specs (no `pyproject.toml` / `uv.lock` inside `streamlit_app/`).
 3. In Streamlit Community Cloud, set **Main file path** to `streamlit_app/app.py`.
-4. Add required secrets in the app settings (for example `OPENAI_API_KEY` and API endpoint/base URL variables used by the UI).
+4. Set secrets/environment variables in Streamlit Cloud:
+   - `STREAMLIT_DIRECT_MODE=true` (recommended default)
+   - `OPENAI_API_KEY`
+   - data-store URLs needed by retrieval (for example `QDRANT_URL`)
 5. Redeploy (or reboot) after changing dependencies or runtime.
 
-If your API is hosted separately, verify the Streamlit app points to that reachable API URL instead of localhost.
+### Optional external backend mode
+
+If you intentionally run Streamlit against a separate FastAPI backend:
+- set `STREAMLIT_DIRECT_MODE=false`
+- set `CAREER_INTEL_API_BASE_URL` to the reachable backend URL
+- keep `streamlit_app/app.py` as the Streamlit entrypoint
 
 ## Documentation
 
