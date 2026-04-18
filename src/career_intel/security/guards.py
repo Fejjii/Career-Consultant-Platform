@@ -12,11 +12,15 @@ still protect).
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import HTTPException
 
 from career_intel.security.hardening import redact_secret_patterns
+
+if TYPE_CHECKING:
+    from career_intel.config import Settings
 
 logger = structlog.get_logger()
 
@@ -99,7 +103,12 @@ def validate_input(text: str, max_length: int = 4000) -> str:
     return sanitized
 
 
-async def validate_input_deep(text: str, max_length: int = 4000) -> str:
+async def validate_input_deep(
+    text: str,
+    max_length: int = 4000,
+    *,
+    settings: Settings | None = None,
+) -> str:
     """Full async validation including classifier layers.
 
     Call this from async endpoints to get Layer 2+3 protection on top
@@ -126,7 +135,7 @@ async def validate_input_deep(text: str, max_length: int = 4000) -> str:
     # Layer 3: OpenAI moderation classifier
     from career_intel.security.injection_classifier import check_injection_classifier
 
-    is_safe, reason = await check_injection_classifier(sanitized)
+    is_safe, reason = await check_injection_classifier(sanitized, settings=settings)
     if not is_safe:
         logger.warning(
             "injection_flagged",

@@ -2912,8 +2912,6 @@ with st.sidebar:
                         st.session_state.active_credential_source = transition.credential_source_after
                         st.session_state[_USER_OPENAI_API_KEY_STATE_KEY] = transition.validated_byok_api_key
                         st.session_state.validated_byok_api_key = transition.validated_byok_api_key
-                        if transition.byok_validated:
-                            st.session_state.byok_api_key_input = ""
                         st.session_state.user_provider_auth_status = transition.user_provider_auth_status
                         st.session_state.byok_last_validation_error = transition.byok_last_validation_error
                         st.session_state.byok_status_notice = transition.byok_status_notice

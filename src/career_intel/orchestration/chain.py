@@ -53,7 +53,11 @@ async def run_turn(
     # --- Step 1: Input guards ---
     from career_intel.security.guards import validate_input_deep
 
-    await validate_input_deep(user_query, max_length=settings.max_input_length)
+    await validate_input_deep(
+        user_query,
+        max_length=settings.max_input_length,
+        settings=settings,
+    )
 
     from career_intel.services.source_inventory import (
         build_source_inventory_summary,
