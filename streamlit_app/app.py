@@ -110,6 +110,7 @@ _SIDEBAR_WIDTH_QUERY_PARAM = "sbw"
 _SIDEBAR_DEFAULT_WIDTH_PX = 328
 _SIDEBAR_MIN_WIDTH_PX = 272
 _SIDEBAR_MAX_WIDTH_PX = 460
+_USER_OPENAI_API_KEY_STATE_KEY = "user_openai_api_key"
 
 # Suggested starters (queued like normal user messages)
 _STARTER_PROMPTS = (
@@ -1910,18 +1911,29 @@ def _retrieval_config_message() -> str | None:
 
 def _active_credential_source() -> str:
     source = str(st.session_state.get("active_credential_source", APP_MANAGED_SOURCE))
-    validated = str(st.session_state.get("validated_byok_api_key", ""))
+    validated = str(st.session_state.get(_USER_OPENAI_API_KEY_STATE_KEY, "")).strip()
     resolved = resolve_credential_source(active_source=source, validated_byok_api_key=validated)
     if resolved != source:
         st.session_state.active_credential_source = resolved
     return resolved
 
 
+def _canonical_user_openai_key() -> str:
+    return str(st.session_state.get(_USER_OPENAI_API_KEY_STATE_KEY, "")).strip()
+
+
+def _sync_user_openai_key_from_input() -> None:
+    """Mirror visible BYOK input into canonical runtime key state."""
+    input_key = str(st.session_state.get("byok_api_key_input", "")).strip()
+    if input_key and input_key != _canonical_user_openai_key():
+        st.session_state[_USER_OPENAI_API_KEY_STATE_KEY] = input_key
+
+
 def _resolved_openai_key() -> str | None:
     """Resolve request key with user BYOK priority over app-managed key."""
     user_key = ""
     if _active_credential_source() == USER_BYOK_SOURCE:
-        user_key = str(st.session_state.get("validated_byok_api_key", "")).strip()
+        user_key = _canonical_user_openai_key()
     resolved = resolve_openai_api_key(user_api_key=user_key, secrets=st.secrets)
     return resolved.api_key
 
@@ -1930,7 +1942,7 @@ def _credential_source_label() -> str:
     """Human-readable credential source label for sidebar status."""
     user_key = ""
     if _active_credential_source() == USER_BYOK_SOURCE:
-        user_key = str(st.session_state.get("validated_byok_api_key", "")).strip()
+        user_key = _canonical_user_openai_key()
     resolved = resolve_openai_api_key(user_api_key=user_key, secrets=st.secrets)
     return resolved.source_label
 
@@ -1967,6 +1979,7 @@ def _apply_pending_byok_clear() -> None:
     transition = transition_after_clear()
     st.session_state.byok_clear_requested = False
     st.session_state.byok_api_key_input = ""
+    st.session_state[_USER_OPENAI_API_KEY_STATE_KEY] = ""
     st.session_state.validated_byok_api_key = transition.validated_byok_api_key
     st.session_state.user_provider_auth_status = transition.user_provider_auth_status
     st.session_state.app_provider_auth_status = None
@@ -2666,6 +2679,7 @@ for key, default in {
     "require_citations": True,
     "selected_model": get_default_model_id(),
     "byok_api_key_input": "",
+    _USER_OPENAI_API_KEY_STATE_KEY: "",
     "validated_byok_api_key": "",
     "active_credential_source": APP_MANAGED_SOURCE,
     "user_provider_auth_status": None,
@@ -2696,6 +2710,7 @@ for key, default in {
 
 ensure_speech_session_keys(st.session_state)
 apply_deferred_speech_clear(st.session_state)
+_sync_user_openai_key_from_input()
 _apply_pending_byok_clear()
 _sync_app_key_model_catalog()
 
@@ -2835,7 +2850,8 @@ with st.sidebar:
         auth_cols = st.columns(2)
         with auth_cols[0]:
             if st.button("Validate key", use_container_width=True):
-                input_key = str(st.session_state.byok_api_key_input).strip()
+                _sync_user_openai_key_from_input()
+                input_key = _canonical_user_openai_key()
                 if not input_key:
                     st.session_state.byok_last_validation_error = "Enter an API key before validation."
                     _frontend_log(
@@ -2878,6 +2894,7 @@ with st.sidebar:
                         source_before = _active_credential_source()
                         selected_before = st.session_state.selected_model
                         st.session_state.active_credential_source = transition.credential_source_after
+                        st.session_state[_USER_OPENAI_API_KEY_STATE_KEY] = transition.validated_byok_api_key
                         st.session_state.validated_byok_api_key = transition.validated_byok_api_key
                         if transition.byok_validated:
                             st.session_state.byok_api_key_input = ""

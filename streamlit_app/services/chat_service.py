@@ -113,13 +113,21 @@ class DirectChatService:
     def __init__(self) -> None:
         self._settings: Settings | None = None
 
-    def _get_settings(self) -> Settings:
+    def _get_settings(self, *, api_key_fallback: str | None = None) -> Settings:
         if self._settings is not None:
             return self._settings
         try:
             self._settings = get_settings()
         except Exception as exc:
-            raise DirectModeError(_settings_validation_message(exc)) from exc
+            missing = set(_extract_missing_setting_names(exc))
+            fallback_key = (api_key_fallback or "").strip()
+            if "OPENAI_API_KEY" in missing and fallback_key:
+                try:
+                    self._settings = Settings(openai_api_key=fallback_key)  # type: ignore[call-arg]
+                except Exception as fallback_exc:
+                    raise DirectModeError(_settings_validation_message(fallback_exc)) from fallback_exc
+            else:
+                raise DirectModeError(_settings_validation_message(exc)) from exc
         return self._settings
 
     def _validate_or_raise(
@@ -155,7 +163,7 @@ class DirectChatService:
         from career_intel.tools.registry import route_query as backend_route_query
 
         self._validate_or_raise(validator="llm", api_key=api_key)
-        settings = self._get_settings()
+        settings = self._get_settings(api_key_fallback=api_key)
         with _llm_override_context(settings=settings, model=model, api_key=api_key):
             decision, usage = await backend_route_query(
                 query,
@@ -201,7 +209,7 @@ class DirectChatService:
         from career_intel.orchestration.synthesize import generate_direct_response
 
         self._validate_or_raise(validator="llm", api_key=api_key)
-        settings = self._get_settings()
+        settings = self._get_settings(api_key_fallback=api_key)
         with _llm_override_context(settings=settings, model=model, api_key=api_key):
             reply, usage = await generate_direct_response(
                 query,
@@ -227,7 +235,7 @@ class DirectChatService:
 
         self._validate_or_raise(validator="llm", api_key=api_key)
         session_id = body.get("session_id") or str(uuid.uuid4())
-        settings = self._get_settings()
+        settings = self._get_settings(api_key_fallback=api_key)
         with _llm_override_context(settings=settings, model=model, api_key=api_key):
             return await run_turn(
                 messages=messages,
@@ -250,7 +258,7 @@ class DirectChatService:
         from career_intel.api.routers.health import provider_auth_status
 
         self._validate_or_raise(validator="llm", api_key=api_key)
-        settings = self._get_settings()
+        settings = self._get_settings(api_key_fallback=api_key)
         with _llm_override_context(settings=settings, model=model, api_key=api_key):
             status = await provider_auth_status()
         return status.model_dump()
@@ -346,7 +354,7 @@ class DirectChatService:
         )
 
         self._validate_or_raise(validator="speech", api_key=api_key)
-        settings = self._get_settings()
+        settings = self._get_settings(api_key_fallback=api_key)
         with _llm_override_context(settings=settings, model=model, api_key=api_key):
             client = get_async_openai_client(
                 settings,
