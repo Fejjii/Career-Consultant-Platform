@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 
 def _ensure_src_on_path() -> None:
     project_root = Path(__file__).resolve().parents[2]
@@ -38,6 +39,53 @@ class DirectModeError(Exception):
     """Raised when direct in-process execution fails."""
 
 
+def _extract_missing_setting_names(exc: Exception) -> list[str]:
+    if not isinstance(exc, ValidationError):
+        return []
+    missing: list[str] = []
+    for err in exc.errors():
+        err_type = str(err.get("type", ""))
+        if err_type != "missing":
+            continue
+        loc = err.get("loc") or ()
+        if not loc:
+            continue
+        name = str(loc[-1]).upper()
+        if name not in missing:
+            missing.append(name)
+    return missing
+
+
+def _settings_validation_message(exc: Exception) -> str:
+    missing = _extract_missing_setting_names(exc)
+    if missing:
+        return "Missing required secret(s): " + ", ".join(missing)
+    return f"Configuration is invalid: {exc}"
+
+
+def validate_llm_config(*, api_key_override: str | None = None) -> str | None:
+    """Validate chat generation configuration and return an actionable message."""
+    if (api_key_override or "").strip():
+        return None
+    if (os.getenv("OPENAI_API_KEY") or "").strip():
+        return None
+    return "Missing required secret: OPENAI_API_KEY"
+
+
+def validate_retrieval_config() -> str | None:
+    """Validate retrieval configuration and return an actionable message."""
+    qdrant_url = (os.getenv("QDRANT_URL") or "").strip()
+    if qdrant_url:
+        return None
+    return "Qdrant configuration is missing, so retrieval is unavailable right now. Set QDRANT_URL."
+
+
+def validate_speech_config(*, api_key_override: str | None = None) -> str | None:
+    """Validate speech transcription configuration and return an actionable message."""
+    # Speech currently depends on OpenAI transcription APIs.
+    return validate_llm_config(api_key_override=api_key_override)
+
+
 @contextmanager
 def _llm_override_context(
     *,
@@ -57,11 +105,38 @@ class DirectChatService:
     """In-process adapter around backend pipeline entry points."""
 
     def __init__(self) -> None:
-        self._settings = get_settings()
+        self._settings: Settings | None = None
+
+    def _get_settings(self) -> Settings:
+        if self._settings is not None:
+            return self._settings
+        try:
+            self._settings = get_settings()
+        except Exception as exc:
+            raise DirectModeError(_settings_validation_message(exc)) from exc
+        return self._settings
+
+    def _validate_or_raise(
+        self,
+        *,
+        validator: str,
+        api_key: str | None = None,
+    ) -> None:
+        message: str | None
+        if validator == "llm":
+            message = validate_llm_config(api_key_override=api_key)
+        elif validator == "retrieval":
+            message = validate_retrieval_config()
+        elif validator == "speech":
+            message = validate_speech_config(api_key_override=api_key)
+        else:
+            message = None
+        if message:
+            raise DirectModeError(message)
 
     @property
     def settings(self) -> Settings:
-        return self._settings
+        return self._get_settings()
 
     async def route_query(
         self,
@@ -73,11 +148,13 @@ class DirectChatService:
     ) -> tuple[RouterDecision, dict[str, Any] | None]:
         from career_intel.tools.registry import route_query as backend_route_query
 
-        with _llm_override_context(settings=self._settings, model=model, api_key=api_key):
+        self._validate_or_raise(validator="llm", api_key=api_key)
+        settings = self._get_settings()
+        with _llm_override_context(settings=settings, model=model, api_key=api_key):
             decision, usage = await backend_route_query(
                 query,
                 cv_available=cv_available,
-                settings=self._settings,
+                settings=settings,
             )
         return decision, usage.model_dump() if usage is not None else None
 
@@ -90,9 +167,11 @@ class DirectChatService:
         from career_intel.rag.query_preprocessor import normalize_query_for_retrieval
         from career_intel.rag.retriever import retrieve_chunks, rewrite_query
 
-        retrieval_context = await normalize_query_for_retrieval(query, settings=self._settings)
-        rewritten = await rewrite_query(retrieval_context.retrieval_query, settings=self._settings)
-        return await retrieve_chunks(query=rewritten, filters=filters, settings=self._settings)
+        self._validate_or_raise(validator="retrieval")
+        settings = self._get_settings()
+        retrieval_context = await normalize_query_for_retrieval(query, settings=settings)
+        rewritten = await rewrite_query(retrieval_context.retrieval_query, settings=settings)
+        return await retrieve_chunks(query=rewritten, filters=filters, settings=settings)
 
     async def run_tool(
         self,
@@ -101,7 +180,8 @@ class DirectChatService:
     ) -> dict[str, Any]:
         from career_intel.tools.registry import execute_tool
 
-        result = await execute_tool(decision, self._settings)
+        settings = self._get_settings()
+        result = await execute_tool(decision, settings)
         return result.model_dump()
 
     async def run_fallback(
@@ -114,10 +194,12 @@ class DirectChatService:
     ) -> tuple[str, dict[str, Any] | None]:
         from career_intel.orchestration.synthesize import generate_direct_response
 
-        with _llm_override_context(settings=self._settings, model=model, api_key=api_key):
+        self._validate_or_raise(validator="llm", api_key=api_key)
+        settings = self._get_settings()
+        with _llm_override_context(settings=settings, model=model, api_key=api_key):
             reply, usage = await generate_direct_response(
                 query,
-                self._settings,
+                settings,
                 answer_length=answer_length,  # type: ignore[arg-type]
             )
         return reply, usage.model_dump() if usage is not None else None
@@ -137,14 +219,16 @@ class DirectChatService:
         except Exception as exc:  # pragma: no cover - defensive validation
             raise DirectModeError(f"Invalid chat payload: {exc}") from exc
 
+        self._validate_or_raise(validator="llm", api_key=api_key)
         session_id = body.get("session_id") or str(uuid.uuid4())
-        with _llm_override_context(settings=self._settings, model=model, api_key=api_key):
+        settings = self._get_settings()
+        with _llm_override_context(settings=settings, model=model, api_key=api_key):
             return await run_turn(
                 messages=messages,
                 session_id=session_id,
                 use_tools=bool(body.get("use_tools", True)),
                 filters=body.get("filters"),
-                settings=self._settings,
+                settings=settings,
                 trace_id=f"streamlit-direct-{session_id}",
                 cv_text=body.get("cv_text"),
                 user_timezone=user_timezone,
@@ -159,28 +243,67 @@ class DirectChatService:
     ) -> dict[str, Any]:
         from career_intel.api.routers.health import provider_auth_status
 
-        with _llm_override_context(settings=self._settings, model=model, api_key=api_key):
+        self._validate_or_raise(validator="llm", api_key=api_key)
+        settings = self._get_settings()
+        with _llm_override_context(settings=settings, model=model, api_key=api_key):
             status = await provider_auth_status()
         return status.model_dump()
 
     async def get_system_status(self) -> dict[str, Any]:
-        from career_intel.api.routers.health import system_status
+        retrieval_error = validate_retrieval_config()
+        if retrieval_error:
+            return {
+                "backend": True,
+                "qdrant": False,
+                "indexed_data_present": False,
+                "collection": "unknown",
+                "points_count": 0,
+                "error": retrieval_error,
+            }
+        try:
+            from career_intel.api.routers.health import system_status
 
-        status = await system_status()
-        return status.model_dump()
+            status = await system_status()
+            return status.model_dump()
+        except Exception as exc:
+            return {
+                "backend": True,
+                "qdrant": False,
+                "indexed_data_present": False,
+                "collection": "unknown",
+                "points_count": 0,
+                "error": f"Qdrant is unavailable right now: {exc}",
+            }
 
     async def get_source_inventory(self) -> dict[str, Any]:
-        from career_intel.api.routers.health import source_inventory
+        retrieval_error = validate_retrieval_config()
+        if retrieval_error:
+            return {
+                "total_source_groups": 0,
+                "total_files_present": 0,
+                "esco_status_note": retrieval_error,
+            }
+        try:
+            from career_intel.api.routers.health import source_inventory
 
-        inventory = await source_inventory()
-        return inventory.model_dump()
+            inventory = await source_inventory()
+            return inventory.model_dump()
+        except Exception:
+            return {
+                "total_source_groups": 0,
+                "total_files_present": 0,
+                "esco_status_note": "Source inventory is temporarily unavailable.",
+            }
 
     async def process_cv_upload(self, *, filename: str, data: bytes) -> dict[str, Any]:
+        max_bytes = 5 * 1024 * 1024
+        if self._settings is not None:
+            max_bytes = self._settings.max_cv_file_bytes
         try:
             cv_text = process_cv(
                 data,
                 filename,
-                max_file_bytes=self._settings.max_cv_file_bytes,
+                max_file_bytes=max_bytes,
             )
         except CVProcessingError as exc:
             raise DirectModeError(str(exc)) from exc
@@ -216,16 +339,18 @@ class DirectChatService:
             transcribe_upload_with_logging,
         )
 
-        with _llm_override_context(settings=self._settings, model=model, api_key=api_key):
+        self._validate_or_raise(validator="speech", api_key=api_key)
+        settings = self._get_settings()
+        with _llm_override_context(settings=settings, model=model, api_key=api_key):
             client = get_async_openai_client(
-                self._settings,
-                timeout_seconds=self._settings.speech_transcription_timeout_seconds,
+                settings,
+                timeout_seconds=settings.speech_transcription_timeout_seconds,
             )
             return await transcribe_upload_with_logging(
                 data=data,
                 filename=file_name,
                 content_type=content_type,
-                settings=self._settings,
+                settings=settings,
                 client=client,
                 speech_source=normalize_speech_source(source),
             )
@@ -241,7 +366,14 @@ def _run_async(coro: Any) -> Any:
             return pool.submit(lambda: asyncio.run(coro)).result()
 
 
-_DIRECT_CHAT_SERVICE = DirectChatService()
+_DIRECT_CHAT_SERVICE: DirectChatService | None = None
+
+
+def _service() -> DirectChatService:
+    global _DIRECT_CHAT_SERVICE
+    if _DIRECT_CHAT_SERVICE is None:
+        _DIRECT_CHAT_SERVICE = DirectChatService()
+    return _DIRECT_CHAT_SERVICE
 
 
 def is_direct_mode_enabled() -> bool:
@@ -257,7 +389,7 @@ def route_query(
     api_key: str | None,
 ) -> tuple[RouterDecision, dict[str, Any] | None]:
     return _run_async(
-        _DIRECT_CHAT_SERVICE.route_query(
+        _service().route_query(
             query=query,
             cv_available=cv_available,
             model=model,
@@ -271,14 +403,14 @@ def run_rag(
     query: str,
     filters: dict[str, Any] | None,
 ) -> list[RetrievedChunk]:
-    return _run_async(_DIRECT_CHAT_SERVICE.run_rag(query=query, filters=filters))
+    return _run_async(_service().run_rag(query=query, filters=filters))
 
 
 def run_tool(
     *,
     decision: RouterDecision,
 ) -> dict[str, Any]:
-    return _run_async(_DIRECT_CHAT_SERVICE.run_tool(decision=decision))
+    return _run_async(_service().run_tool(decision=decision))
 
 
 def run_fallback(
@@ -289,7 +421,7 @@ def run_fallback(
     api_key: str | None,
 ) -> tuple[str, dict[str, Any] | None]:
     return _run_async(
-        _DIRECT_CHAT_SERVICE.run_fallback(
+        _service().run_fallback(
             query=query,
             answer_length=answer_length,
             model=model,
@@ -306,7 +438,7 @@ def generate_response(
     user_timezone: str | None,
 ) -> dict[str, Any]:
     response = _run_async(
-        _DIRECT_CHAT_SERVICE.generate_response(
+        _service().generate_response(
             body=body,
             model=model,
             api_key=api_key,
@@ -321,19 +453,19 @@ def discover_provider_models(
     model: str | None,
     api_key: str | None,
 ) -> dict[str, Any]:
-    return _run_async(_DIRECT_CHAT_SERVICE.discover_provider_models(model=model, api_key=api_key))
+    return _run_async(_service().discover_provider_models(model=model, api_key=api_key))
 
 
 def get_system_status() -> dict[str, Any]:
-    return _run_async(_DIRECT_CHAT_SERVICE.get_system_status())
+    return _run_async(_service().get_system_status())
 
 
 def get_source_inventory() -> dict[str, Any]:
-    return _run_async(_DIRECT_CHAT_SERVICE.get_source_inventory())
+    return _run_async(_service().get_source_inventory())
 
 
 def process_cv_upload(*, filename: str, data: bytes) -> dict[str, Any]:
-    return _run_async(_DIRECT_CHAT_SERVICE.process_cv_upload(filename=filename, data=data))
+    return _run_async(_service().process_cv_upload(filename=filename, data=data))
 
 
 def transcribe_audio(
@@ -346,7 +478,7 @@ def transcribe_audio(
     api_key: str | None,
 ) -> dict[str, Any]:
     return _run_async(
-        _DIRECT_CHAT_SERVICE.transcribe_audio(
+        _service().transcribe_audio(
             file_name=file_name,
             content_type=content_type,
             data=data,

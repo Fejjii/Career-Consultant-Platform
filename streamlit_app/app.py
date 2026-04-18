@@ -48,6 +48,7 @@ from sources_panel import (
 )
 from speech_client import post_speech_transcribe
 from services.chat_service import (
+    DirectModeError,
     generate_response as generate_response_direct,
     get_source_inventory as get_source_inventory_direct,
     get_system_status as get_system_status_direct,
@@ -2051,8 +2052,10 @@ def _call_non_streaming(body: dict) -> tuple[str, dict]:
                 "answer_source": data.get("answer_source"),
                 "provider_usage": data.get("usage"),
             }
+        except DirectModeError as exc:
+            return str(exc), {"error": True}
         except Exception as exc:
-            return f"Unexpected error: {exc}", {"error": True}
+            return f"Direct mode error: {exc}", {"error": True}
 
     if not API_BASE:
         return "External API mode requires CAREER_INTEL_API_BASE_URL.", {"error": True}

@@ -283,6 +283,13 @@ This repo supports **single-deployment Streamlit mode**: the UI executes backend
    - data-store URLs needed by retrieval (for example `QDRANT_URL`)
 5. Redeploy (or reboot) after changing dependencies or runtime.
 
+### Required Streamlit secrets
+
+- Basic chat (LLM): `OPENAI_API_KEY`
+- Retrieval (RAG): `QDRANT_URL` (plus collection/name overrides if used)
+- Speech transcription: `OPENAI_API_KEY`
+- Optional external backend mode only: `CAREER_INTEL_API_BASE_URL` (when `STREAMLIT_DIRECT_MODE=false`)
+
 ### Optional external backend mode
 
 If you intentionally run Streamlit against a separate FastAPI backend:
