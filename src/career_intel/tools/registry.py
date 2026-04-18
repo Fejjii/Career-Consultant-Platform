@@ -14,7 +14,8 @@ import structlog
 
 from career_intel.config import Settings, get_settings
 from career_intel.llm import get_chat_llm
-from career_intel.schemas.api import ToolCallResult
+from career_intel.llm.token_usage import usage_from_langchain_message
+from career_intel.schemas.api import TokenUsage, ToolCallResult
 from career_intel.schemas.domain import (
     LearningPlanInput,
     RetrievedChunk,
@@ -22,18 +23,73 @@ from career_intel.schemas.domain import (
     RouterDecision,
     SkillGapInput,
 )
+from career_intel.services.runtime_utility import assess_dynamic_runtime_query
 
 logger = structlog.get_logger()
+
+_NAMED_SOURCE_RETRIEVAL_HINTS = (
+    "wef",
+    "world economic forum",
+    "future of jobs",
+    "esco",
+    "isco",
+)
+_DOMAIN_TREND_SIGNAL_HINTS = (
+    "trend",
+    "trends",
+    "future",
+    "job market",
+    "labor market",
+    "labour market",
+    "demand",
+    "growing role",
+    "growing roles",
+    "roles are growing",
+    "growing because of",
+    "emerging role",
+    "emerging roles",
+    "skills becoming important",
+    "becoming more important",
+    "workforce",
+    "automation",
+    "upskilling",
+    "reskilling",
+)
+_DATA_AI_DOMAIN_HINTS = (
+    "data",
+    "ai",
+    "artificial intelligence",
+    "machine learning",
+    "ml",
+    "analytics",
+    "data engineering",
+    "data engineer",
+)
+_CAREER_CONTEXT_HINTS = (
+    "career",
+    "careers",
+    "role",
+    "roles",
+    "job",
+    "jobs",
+    "skill",
+    "skills",
+    "professional",
+    "professionals",
+)
 
 ROUTER_PROMPT = """\
 You are the query router for a career intelligence assistant.
 
 ## Step 1 — Classify the user's INTENT (pick exactly one):
 - "small_talk" — greetings, thanks, off-topic chit-chat.
-- "direct_answer" — the user asks a factual question you can answer from \
-general knowledge (no retrieval or tools needed).
-- "retrieval_required" — the user needs career/skill/role information that \
-requires looking up evidence from the knowledge base.
+- "general_knowledge" — broad factual or conceptual questions that can be answered \
+without internal retrieval or tools.
+- "domain_specific" — career/skills/jobs/interview/labor-market questions that should \
+be grounded in internal knowledge retrieval. This includes broad trend or labor-market \
+questions about data/AI careers even when no source name is explicitly mentioned.
+- "dynamic_runtime" — questions needing runtime facts (date/time/current temporal values) \
+that should be handled deterministically, not by model recall.
 - "tool_required" — the user needs a structured analysis (skill gap, role \
 comparison, learning plan) that maps to one of the tools below.
 
@@ -65,7 +121,7 @@ async def route_query(
     *,
     cv_available: bool = False,
     settings: Settings | None = None,
-) -> RouterDecision:
+) -> tuple[RouterDecision, TokenUsage | None]:
     """Classify the query intent, optional tool, and CV relevance."""
     if settings is None:
         settings = get_settings()
@@ -77,20 +133,24 @@ async def route_query(
     )
     response = await llm.ainvoke([{"role": "user", "content": prompt}])
     raw = response.content if hasattr(response, "content") else str(response)
+    router_usage = usage_from_langchain_message(response)
 
     parsed = _parse_router_response(raw)
     decision = _normalize_decision(parsed, cv_available=cv_available)
+    decision = _apply_named_source_retrieval_bias(query, decision)
+    decision = _apply_domain_trend_retrieval_bias(query, decision)
+    decision = _apply_runtime_bias(query, decision)
 
     logger.info(
         "router_decision",
         query_preview=query[:80],
-        intent=decision.intent,
+        classified_intent=decision.intent,
         confidence=decision.confidence,
         tool=decision.tool_name,
         use_cv=decision.use_cv,
         reason=decision.reason,
     )
-    return decision
+    return decision, router_usage
 
 
 async def maybe_call_tools(
@@ -113,7 +173,7 @@ async def maybe_call_tools(
     if settings is None:
         settings = get_settings()
 
-    decision = await route_query(query, cv_available=cv_available, settings=settings)
+    decision, _router_usage = await route_query(query, cv_available=cv_available, settings=settings)
 
     if decision.tool_name is None:
         return [], decision
@@ -190,8 +250,26 @@ async def _execute_tool(
         raise ValueError(f"Unknown tool: {tool_name}")
 
 
-_VALID_INTENTS = {"small_talk", "direct_answer", "retrieval_required", "tool_required"}
+_INTENT_ALIASES = {
+    "direct_answer": "general_knowledge",
+    "retrieval_required": "domain_specific",
+}
+_VALID_INTENTS = {
+    "small_talk",
+    "general_knowledge",
+    "domain_specific",
+    "dynamic_runtime",
+    "tool_required",
+}
 _VALID_TOOLS = {"skill_gap", "role_compare", "learning_plan"}
+
+
+def canonicalize_intent(intent: str) -> str:
+    """Normalize legacy or unknown intents to the current taxonomy."""
+    normalized = str(intent or "").strip().lower()
+    if normalized in _INTENT_ALIASES:
+        return _INTENT_ALIASES[normalized]
+    return normalized
 
 
 def _parse_router_response(text: str) -> dict[str, Any]:
@@ -218,7 +296,7 @@ def _normalize_decision(
     Handles both the new intent-first format and the legacy ``tool``-only
     format for backward compatibility.
     """
-    intent = parsed.get("intent", "").lower()
+    intent = canonicalize_intent(parsed.get("intent", ""))
     tool_name = parsed.get("tool_name") or parsed.get("tool")
     params = parsed.get("params", {})
     confidence = float(parsed.get("confidence", 0.0))
@@ -232,12 +310,12 @@ def _normalize_decision(
         intent = "tool_required"
 
     if intent not in _VALID_INTENTS:
-        intent = "retrieval_required" if tool_name is None else "tool_required"
+        intent = "domain_specific" if tool_name is None else "tool_required"
 
     if tool_name and tool_name not in _VALID_TOOLS:
         logger.warning("unknown_tool_from_router", tool=tool_name)
         tool_name = None
-        intent = "retrieval_required"
+        intent = "domain_specific"
 
     return RouterDecision(
         intent=intent,  # type: ignore[arg-type]
@@ -246,4 +324,76 @@ def _normalize_decision(
         params=params,
         use_cv=use_cv,
         reason=reason,
+    )
+
+
+def _apply_named_source_retrieval_bias(query: str, decision: RouterDecision) -> RouterDecision:
+    """Force retrieval for named-source knowledge queries unless a tool is required."""
+    if decision.intent in {"domain_specific", "tool_required", "small_talk"}:
+        return decision
+
+    lowered = query.lower()
+    if not any(hint in lowered for hint in _NAMED_SOURCE_RETRIEVAL_HINTS):
+        return decision
+
+    return decision.model_copy(
+        update={
+            "intent": "domain_specific",
+            "tool_name": None,
+            "params": {},
+            "reason": (
+                "The query names a specific source or taxonomy, so it should be grounded in "
+                "retrieved evidence from the knowledge base."
+            ),
+        }
+    )
+
+
+def _apply_domain_trend_retrieval_bias(query: str, decision: RouterDecision) -> RouterDecision:
+    """Bias broad data/AI labor-market trend queries toward retrieval."""
+    if decision.intent in {"domain_specific", "tool_required", "small_talk", "dynamic_runtime"}:
+        return decision
+
+    lowered = query.lower()
+    has_trend_signal = any(hint in lowered for hint in _DOMAIN_TREND_SIGNAL_HINTS)
+    has_data_ai_signal = any(hint in lowered for hint in _DATA_AI_DOMAIN_HINTS)
+    has_career_context = any(hint in lowered for hint in _CAREER_CONTEXT_HINTS)
+
+    if not (has_trend_signal and has_data_ai_signal and has_career_context):
+        return decision
+
+    return decision.model_copy(
+        update={
+            "intent": "domain_specific",
+            "tool_name": None,
+            "params": {},
+            "reason": (
+                "The query asks about data/AI labor-market or skills trends, so it should be "
+                "grounded in retrieved domain evidence."
+            ),
+        }
+    )
+
+
+def _apply_runtime_bias(query: str, decision: RouterDecision) -> RouterDecision:
+    """Promote clear runtime/datetime queries to the dynamic runtime intent."""
+    if decision.intent == "tool_required":
+        return decision
+
+    runtime_assessment = assess_dynamic_runtime_query(query)
+    if not runtime_assessment.is_dynamic_runtime:
+        return decision
+
+    adjusted_confidence = max(decision.confidence, runtime_assessment.confidence)
+    return decision.model_copy(
+        update={
+            "intent": "dynamic_runtime",
+            "tool_name": None,
+            "params": {},
+            "confidence": min(adjusted_confidence, 1.0),
+            "reason": (
+                "The query appears to require runtime calendar/time data and should be answered "
+                "deterministically."
+            ),
+        }
     )

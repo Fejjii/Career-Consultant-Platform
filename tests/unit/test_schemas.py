@@ -23,6 +23,21 @@ class TestChatRequest:
             session_id="abc",
         )
         assert len(req.messages) == 1
+        assert req.answer_length == "balanced"
+
+    def test_answer_length_accepts_valid_modes(self) -> None:
+        req = ChatRequest(
+            messages=[ChatMessage(role="user", content="Hello")],
+            answer_length="detailed",
+        )
+        assert req.answer_length == "detailed"
+
+    def test_invalid_answer_length_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ChatRequest(
+                messages=[ChatMessage(role="user", content="Hello")],
+                answer_length="verbose",  # type: ignore[arg-type]
+            )
 
     def test_empty_messages_rejected(self) -> None:
         with pytest.raises(ValidationError):

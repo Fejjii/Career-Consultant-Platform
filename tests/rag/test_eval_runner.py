@@ -96,7 +96,7 @@ class TestRoutingAccuracy:
 
     def test_incorrect_routing(self) -> None:
         ex = GoldenExample(query="hello", expected_behaviour="small_talk", tags=["small_talk"])
-        result = check_routing_accuracy(ex, actual_intent="retrieval_required")
+        result = check_routing_accuracy(ex, actual_intent="domain_specific")
         assert result["correct"] is False
 
     def test_tool_routing_from_behaviour(self) -> None:
@@ -110,7 +110,7 @@ class TestRunEvaluation:
         results = [
             {"query": "hello", "intent": "small_talk", "routing_correct": True,
              "retrieval_invoked": False, "sources_count": 0, "total_latency_ms": 200},
-            {"query": "skills?", "intent": "retrieval_required", "routing_correct": True,
+            {"query": "skills?", "intent": "domain_specific", "routing_correct": True,
              "retrieval_invoked": True, "sources_count": 3, "total_latency_ms": 1500},
         ]
         summary = run_evaluation(results)

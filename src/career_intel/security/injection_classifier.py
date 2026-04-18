@@ -28,6 +28,7 @@ import structlog
 from openai import OpenAI
 
 from career_intel.config import Settings, get_settings
+from career_intel.llm.clients import resolve_openai_api_key
 
 logger = structlog.get_logger()
 
@@ -60,7 +61,7 @@ async def check_injection_classifier(
         import asyncio
 
         client = OpenAI(
-            api_key=settings.openai_api_key.get_secret_value(),
+            api_key=resolve_openai_api_key(settings),
             max_retries=2,
         )
         result = await asyncio.get_event_loop().run_in_executor(

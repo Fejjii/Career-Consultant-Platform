@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
@@ -12,11 +13,21 @@ from career_intel.config import get_settings
 logger = structlog.get_logger()
 
 VECTOR_SIZE = 1536  # text-embedding-3-small default
+ESCO_DOC_TYPES: tuple[str, ...] = (
+    "occupation_summary",
+    "skill_summary",
+    "relation_detail",
+    "taxonomy_mapping",
+    "isco_group_summary",
+)
 
 
 def get_qdrant_client() -> QdrantClient:
     settings = get_settings()
-    return QdrantClient(url=settings.qdrant_url)
+    return QdrantClient(
+        url=settings.qdrant_url,
+        timeout=settings.qdrant_timeout_seconds,
+    )
 
 
 def ensure_collection(client: QdrantClient | None = None) -> None:
@@ -62,6 +73,38 @@ def upsert_vectors(
     logger.info("qdrant_upsert", count=len(points))
 
 
+def delete_vectors_by_metadata(
+    metadata_filters: dict[str, Any],
+    client: QdrantClient | None = None,
+) -> None:
+    """Delete points matching metadata filters.
+
+    Used by ingestion to make document re-runs idempotent when a file changes.
+    """
+    settings = get_settings()
+    if client is None:
+        client = get_qdrant_client()
+
+    conditions = [
+        models.FieldCondition(
+            key=key,
+            match=models.MatchValue(value=value),
+        )
+        for key, value in metadata_filters.items()
+    ]
+
+    if not conditions:
+        return
+
+    client.delete(
+        collection_name=settings.qdrant_collection,
+        points_selector=models.FilterSelector(
+            filter=models.Filter(must=conditions),
+        ),
+    )
+    logger.info("qdrant_delete_by_metadata", filters=metadata_filters)
+
+
 def search_vectors(
     query_vector: list[float],
     top_k: int = 20,
@@ -73,17 +116,7 @@ def search_vectors(
     if client is None:
         client = get_qdrant_client()
 
-    qdrant_filter = None
-    if filters:
-        conditions = []
-        for key, value in filters.items():
-            conditions.append(
-                models.FieldCondition(
-                    key=key,
-                    match=models.MatchValue(value=value),
-                )
-            )
-        qdrant_filter = models.Filter(must=conditions)
+    qdrant_filter = _build_qdrant_filter(filters)
 
     results = client.query_points(
         collection_name=settings.qdrant_collection,
@@ -94,3 +127,136 @@ def search_vectors(
     )
 
     return results.points
+
+
+def count_vectors(
+    filters: dict[str, Any] | None = None,
+    client: QdrantClient | None = None,
+) -> int:
+    """Count points matching the given metadata filters."""
+    settings = get_settings()
+    if client is None:
+        client = get_qdrant_client()
+
+    result = client.count(
+        collection_name=settings.qdrant_collection,
+        count_filter=_build_qdrant_filter(filters),
+        exact=True,
+    )
+    return int(result.count)
+
+
+def sample_payloads(
+    filters: dict[str, Any] | None = None,
+    *,
+    limit: int = 1,
+    client: QdrantClient | None = None,
+) -> list[dict[str, Any]]:
+    """Return a small payload sample for debugging filter behavior."""
+    settings = get_settings()
+    if client is None:
+        client = get_qdrant_client()
+
+    points, _ = client.scroll(
+        collection_name=settings.qdrant_collection,
+        scroll_filter=_build_qdrant_filter(filters),
+        limit=limit,
+        with_payload=True,
+        with_vectors=False,
+    )
+    return [point.payload or {} for point in points]
+
+
+def get_esco_vector_diagnostics(
+    *,
+    doc_types: Sequence[str] = ESCO_DOC_TYPES,
+    client: QdrantClient | None = None,
+) -> dict[str, Any]:
+    """Return grouped ESCO vector diagnostics for live verification."""
+    total_esco_vectors = count_vectors(filters={"source": "esco"}, client=client)
+    counts_by_doc_type: dict[str, int] = {}
+    sample_payloads_by_doc_type: dict[str, dict[str, Any]] = {}
+
+    for doc_type in doc_types:
+        filters = {"source": "esco", "esco_doc_type": doc_type}
+        count = count_vectors(filters=filters, client=client)
+        counts_by_doc_type[doc_type] = count
+        if count <= 0:
+            continue
+        samples = sample_payloads(filters=filters, limit=1, client=client)
+        if samples:
+            sample_payloads_by_doc_type[doc_type] = _sanitize_payload_for_diagnostics(samples[0])
+
+    return {
+        "total_esco_vectors": total_esco_vectors,
+        "counts_by_esco_doc_type": counts_by_doc_type,
+        "sample_payloads_by_esco_doc_type": sample_payloads_by_doc_type,
+    }
+
+
+def _build_qdrant_filter(filters: dict[str, Any] | None) -> models.Filter | None:
+    """Translate generic metadata filters into a Qdrant filter."""
+    if not filters:
+        return None
+
+    must_conditions = []
+    should_conditions = []
+    for key, value in filters.items():
+        if key == "source":
+            should_conditions.extend(
+                [
+                    models.FieldCondition(
+                        key="source",
+                        match=models.MatchValue(value=value),
+                    ),
+                    models.FieldCondition(
+                        key="source_name",
+                        match=models.MatchValue(value=value),
+                    ),
+                    models.FieldCondition(
+                        key="source_type",
+                        match=models.MatchValue(value=value),
+                    ),
+                ]
+            )
+            continue
+
+        must_conditions.append(
+            models.FieldCondition(
+                key=key,
+                match=models.MatchValue(value=value),
+            )
+        )
+
+    return models.Filter(
+        must=must_conditions or None,
+        should=should_conditions or None,
+    )
+
+
+def _sanitize_payload_for_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep verification output compact and focused on grounding metadata."""
+    return {
+        key: payload.get(key)
+        for key in (
+            "source",
+            "source_name",
+            "source_type",
+            "file_name",
+            "document_title",
+            "title",
+            "topic",
+            "entity_type",
+            "esco_doc_type",
+            "section_title",
+            "occupation_id",
+            "occupation_label",
+            "occupation_code",
+            "skill_id",
+            "skill_label",
+            "relation_type",
+            "isco_group",
+            "isco_group_label",
+            "uri",
+        )
+    }

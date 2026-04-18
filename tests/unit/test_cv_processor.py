@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
+from docx import Document
 
 from career_intel.services.cv_processor import (
     CVProcessingError,
@@ -19,7 +22,19 @@ class TestValidateCvUpload:
         validate_cv_upload(b"some content", "cv.txt")
 
     def test_valid_pdf(self) -> None:
-        validate_cv_upload(b"fake-pdf", "resume.pdf")
+        validate_cv_upload(b"%PDF-1.7\nfake-pdf", "resume.pdf")
+
+    def test_fake_pdf_rejected(self) -> None:
+        with pytest.raises(CVProcessingError, match="does not match its extension"):
+            validate_cv_upload(b"not-a-real-pdf", "resume.pdf")
+
+    def test_fake_docx_rejected(self) -> None:
+        with pytest.raises(CVProcessingError, match="DOCX appears malformed"):
+            validate_cv_upload(b"PK-not-a-docx", "resume.docx")
+
+    def test_binary_txt_rejected(self) -> None:
+        with pytest.raises(CVProcessingError, match="binary content"):
+            validate_cv_upload(b"hello\x00world", "resume.txt")
 
     def test_empty_filename_rejected(self) -> None:
         with pytest.raises(CVProcessingError, match="Filename is required"):
@@ -58,6 +73,15 @@ class TestExtractTextFromBytes:
     def test_empty_txt(self) -> None:
         result = extract_text_from_bytes(b"", "cv.txt")
         assert result == ""
+
+    def test_docx_extracts_paragraphs(self) -> None:
+        doc = Document()
+        doc.add_paragraph("John Doe")
+        doc.add_paragraph("Senior Engineer")
+        buffer = io.BytesIO()
+        doc.save(buffer)
+        result = extract_text_from_bytes(buffer.getvalue(), "cv.docx")
+        assert "John Doe" in result
 
 
 class TestCleanCvText:

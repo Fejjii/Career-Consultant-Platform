@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from career_intel.api.routers import chat, cv, evaluation, feedback, health, ingest, metrics
+from career_intel.api.routers import chat, cv, evaluation, feedback, health, ingest, metrics, speech
 from career_intel.config import get_settings
+from career_intel.llm.clients import validate_chat_model_override
+from career_intel.llm.request_context import reset_request_llm_overrides, set_request_llm_overrides
 from career_intel.logging import setup_logging
 
 logger = structlog.get_logger()
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 
 @asynccontextmanager
@@ -32,6 +37,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         environment=settings.environment,
         qdrant_url=settings.qdrant_url,
     )
+    if (
+        settings.environment in {"staging", "production"}
+        and settings.admin_secret.get_secret_value() == "change-me-in-production"
+    ):
+        logger.error("admin_secret_default_in_non_dev_environment")
     yield
     logger.info("app_shutdown")
 
@@ -53,7 +63,29 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    rate_limited_prefixes = ("/chat", "/ingest", "/feedback")
+    rate_limited_prefixes = ("/chat", "/ingest", "/feedback", "/speech", "/health/provider-auth")
+
+    @app.middleware("http")
+    async def request_llm_override_middleware(request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
+        """Bind per-request model and API key overrides without persisting them."""
+        try:
+            model_override = validate_chat_model_override(
+                request.headers.get("X-OpenAI-Model"),
+                settings,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid_model_override", "detail": str(exc)},
+            )
+        tokens = set_request_llm_overrides(
+            api_key=request.headers.get("X-OpenAI-API-Key"),
+            model=model_override,
+        )
+        try:
+            return await call_next(request)
+        finally:
+            reset_request_llm_overrides(*tokens)
 
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
@@ -104,6 +136,7 @@ def create_app() -> FastAPI:
     app.include_router(feedback.router)
     app.include_router(evaluation.router)
     app.include_router(metrics.router)
+    app.include_router(speech.router)
 
     return app
 

@@ -14,6 +14,7 @@ from pydantic import Field
 
 from career_intel.api.deps import SettingsDep
 from career_intel.schemas.domain import CVRiskScore
+from career_intel.security.hardening import sanitize_upload_filename
 from career_intel.security.sanitize import score_cv_risk
 from career_intel.services.cv_processor import (
     CVProcessingError,
@@ -52,7 +53,7 @@ async def process_cv_upload(
     The response includes the cleaned text, a risk score, and any warnings.
     The caller can then include ``cv_text`` in subsequent chat requests.
     """
-    filename = file.filename or "unknown"
+    filename = sanitize_upload_filename(file.filename, default_name="resume.txt")
     logger.info("cv_upload_received", filename=filename, content_type=file.content_type)
 
     data = await file.read()

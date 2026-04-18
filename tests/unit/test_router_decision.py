@@ -8,9 +8,9 @@ from career_intel.tools.registry import _normalize_decision, _parse_router_respo
 
 class TestParseRouterResponse:
     def test_valid_json(self) -> None:
-        raw = '{"intent": "retrieval_required", "confidence": 0.9, "tool_name": null, "params": {}, "use_cv": false, "reason": "fact lookup"}'
+        raw = '{"intent": "domain_specific", "confidence": 0.9, "tool_name": null, "params": {}, "use_cv": false, "reason": "fact lookup"}'
         result = _parse_router_response(raw)
-        assert result["intent"] == "retrieval_required"
+        assert result["intent"] == "domain_specific"
 
     def test_markdown_fenced_json(self) -> None:
         raw = '```json\n{"intent": "small_talk", "confidence": 0.95}\n```'
@@ -46,20 +46,20 @@ class TestNormalizeDecision:
         assert decision.intent == "tool_required"
         assert decision.tool_name == "role_compare"
 
-    def test_legacy_none_tool_maps_to_retrieval(self) -> None:
+    def test_legacy_none_tool_maps_to_domain_specific(self) -> None:
         parsed = {"tool": "none", "params": {}, "use_cv": False}
         decision = _normalize_decision(parsed, cv_available=False)
-        assert decision.intent == "retrieval_required"
+        assert decision.intent == "domain_specific"
         assert decision.tool_name is None
 
     def test_unknown_tool_falls_back(self) -> None:
         parsed = {"intent": "tool_required", "tool_name": "nonexistent_tool", "params": {}}
         decision = _normalize_decision(parsed, cv_available=False)
         assert decision.tool_name is None
-        assert decision.intent == "retrieval_required"
+        assert decision.intent == "domain_specific"
 
     def test_use_cv_false_when_no_cv_available(self) -> None:
-        parsed = {"intent": "retrieval_required", "use_cv": True}
+        parsed = {"intent": "domain_specific", "use_cv": True}
         decision = _normalize_decision(parsed, cv_available=False)
         assert decision.use_cv is False
 
@@ -70,7 +70,7 @@ class TestNormalizeDecision:
 
     def test_empty_parsed_defaults(self) -> None:
         decision = _normalize_decision({}, cv_available=False)
-        assert decision.intent == "retrieval_required"
+        assert decision.intent == "domain_specific"
         assert decision.tool_name is None
         assert decision.use_cv is False
 
@@ -80,10 +80,10 @@ class TestNormalizeDecision:
         assert decision.intent == "small_talk"
         assert decision.tool_name is None
 
-    def test_direct_answer_intent(self) -> None:
-        parsed = {"intent": "direct_answer", "confidence": 0.8, "reason": "simple fact"}
+    def test_general_knowledge_intent(self) -> None:
+        parsed = {"intent": "general_knowledge", "confidence": 0.8, "reason": "simple fact"}
         decision = _normalize_decision(parsed, cv_available=False)
-        assert decision.intent == "direct_answer"
+        assert decision.intent == "general_knowledge"
 
 
 class TestRouterDecisionModel:

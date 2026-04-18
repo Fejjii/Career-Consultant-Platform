@@ -17,15 +17,38 @@ class ChunkMetadata(BaseModel):
     source_id: str
     source_type: str
     title: str
+    document_title: str | None = None
     section: str | None = None
+    section_title: str | None = None
     page_or_loc: str | None = None
+    page_number: int | None = None
     publish_year: int | None = None
     license: str | None = None
+    entity_type: str | None = None
+    source_priority: int | None = None
+    occupation_id: str | None = None
+    occupation_label: str | None = None
     occupation_code: str | None = None
+    isco_group: str | None = None
+    isco_group_label: str | None = None
     skill_id: str | None = None
+    skill_label: str | None = None
+    skill_type: str | None = None
+    relation_type: str | None = None
+    esco_doc_type: str | None = None
+    language: str | None = None
     uri: str | None = None
     chunk_index: int
     parent_doc_id: str
+    file_name: str | None = None
+    topic: str | None = Field(
+        default=None,
+        description="Logical topic path or file grouping from ingestion (e.g. esco/occupations_en).",
+    )
+    source: str | None = Field(
+        default=None,
+        description="Corpus namespace: wef | esco (mirrors ingest metadata).",
+    )
 
 
 class DocumentRecord(BaseModel):
@@ -46,6 +69,7 @@ class RetrievedChunk(BaseModel):
     text: str
     metadata: ChunkMetadata
     score: float
+    rerank_score: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +132,13 @@ class RouterDecision(BaseModel):
 
     intent: Literal[
         "small_talk",
+        "general_knowledge",
+        "domain_specific",
+        "dynamic_runtime",
+        "tool_required",
+        # Legacy aliases kept for compatibility with older tests/callers.
         "direct_answer",
         "retrieval_required",
-        "tool_required",
     ] = Field(
         description="High-level classification of the user's goal.",
     )

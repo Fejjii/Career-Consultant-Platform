@@ -1,0 +1,193 @@
+[
+  {
+    "id": "wef-01",
+    "category": "wef",
+    "query": "What major labour-market shifts are highlighted in the WEF Future of Jobs 2025 report?",
+    "expected_answer": "The WEF reports accelerated digitalization, AI adoption, green transition pressure, and continued demand shifts across technology and care-related roles.",
+    "expected_contexts": [
+      "Future of Jobs Report 2025",
+      "labour-market shifts",
+      "digitalization and AI adoption",
+      "green transition"
+    ]
+  },
+  {
+    "id": "wef-02",
+    "category": "wef",
+    "query": "According to WEF, which role groups are expected to grow fastest by 2030?",
+    "expected_answer": "WEF highlights growth in technology roles, data/AI roles, green and sustainability jobs, and selected frontline care or service roles depending on region.",
+    "expected_contexts": [
+      "fastest growing roles",
+      "technology and data roles",
+      "green jobs",
+      "Future of Jobs"
+    ]
+  },
+  {
+    "id": "wef-03",
+    "category": "wef",
+    "query": "How does WEF describe AI's impact on job redesign and skills?",
+    "expected_answer": "WEF describes AI as a driver of task redesign, augmentation, and reskilling needs rather than a single uniform replacement effect.",
+    "expected_contexts": [
+      "AI impact on jobs",
+      "job redesign",
+      "reskilling and upskilling"
+    ]
+  },
+  {
+    "id": "wef-04",
+    "category": "wef",
+    "query": "What cognitive skills are repeatedly emphasized across WEF future of jobs reports?",
+    "expected_answer": "WEF repeatedly emphasizes analytical thinking, problem solving, adaptability, and continuous learning as durable cognitive priorities.",
+    "expected_contexts": [
+      "cognitive skills",
+      "analytical thinking",
+      "problem solving",
+      "adaptability"
+    ]
+  },
+  {
+    "id": "wef-05",
+    "category": "wef",
+    "query": "What does WEF report about demand for sustainability and green-transition skills?",
+    "expected_answer": "WEF reports increasing demand for sustainability and climate-transition capabilities, with stronger need for green skills across multiple sectors.",
+    "expected_contexts": [
+      "sustainability skills",
+      "green transition",
+      "future labour demand"
+    ]
+  },
+  {
+    "id": "esco-rel-01",
+    "category": "esco_relation",
+    "query": "Which occupations in ESCO are closely tied to Python and SQL skills?",
+    "expected_answer": "ESCO links Python and SQL to data-heavy occupations such as data engineer, data analyst, and related software or BI profiles depending on relation type.",
+    "expected_contexts": [
+      "python programming",
+      "sql databases",
+      "data engineering occupations",
+      "essential and optional skill relations"
+    ]
+  },
+  {
+    "id": "esco-rel-02",
+    "category": "esco_relation",
+    "query": "In ESCO, what is the difference between essential and optional skills for an occupation?",
+    "expected_answer": "Essential skills are core requirements for competent performance in a role, while optional skills are beneficial but not strictly required.",
+    "expected_contexts": [
+      "essential skills",
+      "optional skills",
+      "occupation-skill relation type",
+      "relation type metadata"
+    ]
+  },
+  {
+    "id": "esco-rel-03",
+    "category": "esco_relation",
+    "query": "Which occupations are linked to ETL or data pipeline skills in ESCO?",
+    "expected_answer": "ESCO relation mappings connect ETL and data-pipeline skills to occupations in data engineering, business intelligence, and integration-focused analytics roles.",
+    "expected_contexts": [
+      "etl processes",
+      "data pipeline design",
+      "occupation-skill links",
+      "data integration skills"
+    ]
+  },
+  {
+    "id": "esco-rel-04",
+    "category": "esco_relation",
+    "query": "What essential skills are commonly associated with the data engineer occupation in ESCO?",
+    "expected_answer": "ESCO typically associates data engineering with database querying, data integration, pipeline construction, and data quality or processing competencies.",
+    "expected_contexts": [
+      "data engineer occupation",
+      "python programming",
+      "sql databases",
+      "etl processes",
+      "data pipeline design"
+    ]
+  },
+  {
+    "id": "esco-rel-05",
+    "category": "esco_relation",
+    "query": "Does ESCO indicate relation strength differences between SQL and cloud platform skills for data engineering occupations?",
+    "expected_answer": "ESCO relation evidence should distinguish skill links by relation typing and mapped occupation context rather than claiming unsupported numeric strength.",
+    "expected_contexts": [
+      "sql databases",
+      "cloud platform skills",
+      "occupation-skill relation type",
+      "essential and optional skills"
+    ]
+  },
+  {
+    "id": "esco-tax-01",
+    "category": "esco_taxonomy",
+    "query": "How does ISCO grouping relate to ESCO occupations?",
+    "expected_answer": "ESCO occupations are mapped to ISCO groups to provide a shared classification structure and crosswalk for occupational taxonomy.",
+    "expected_contexts": [
+      "ISCOGroups",
+      "taxonomy mapping",
+      "ESCO occupations"
+    ]
+  },
+  {
+    "id": "esco-tax-02",
+    "category": "esco_taxonomy",
+    "query": "How is the ESCO skills hierarchy organized at a high level?",
+    "expected_answer": "The ESCO skills hierarchy organizes broad skill groups into more specific skills and competences through parent-child taxonomy relations.",
+    "expected_contexts": [
+      "skillsHierarchy",
+      "parent child",
+      "skill taxonomy"
+    ]
+  },
+  {
+    "id": "esco-tax-03",
+    "category": "esco_taxonomy",
+    "query": "What is the difference between ESCO occupations data and ESCO skills data?",
+    "expected_answer": "ESCO occupations describe job roles while ESCO skills describe competences; relation files connect the two through essential or optional mappings.",
+    "expected_contexts": [
+      "occupations_en.csv",
+      "skills_en.csv",
+      "occupationSkillRelations"
+    ]
+  },
+  {
+    "id": "esco-tax-04",
+    "category": "esco_taxonomy",
+    "query": "Can ESCO taxonomy mapping be used to trace occupation families from ISCO major groups to specific ESCO roles?",
+    "expected_answer": "Yes, taxonomy mapping can trace from higher-level ISCO groupings down to mapped ESCO occupations when those links exist in the dataset.",
+    "expected_contexts": [
+      "isco_group_summary",
+      "taxonomy_mapping",
+      "occupation families"
+    ]
+  },
+  {
+    "id": "fallback-01",
+    "category": "fallback",
+    "query": "Tell me the exact salary I will earn next year as a machine learning engineer in Berlin.",
+    "expected_answer": "The assistant should avoid fabricated certainty and respond with uncertainty-aware guidance or a bounded explanation rather than an exact guaranteed salary.",
+    "expected_contexts": []
+  },
+  {
+    "id": "fallback-02",
+    "category": "fallback",
+    "query": "Will learning Python guarantee that I get hired in AI within two months?",
+    "expected_answer": "The assistant should refuse guarantees, explain uncertainty, and provide practical next-step guidance.",
+    "expected_contexts": []
+  },
+  {
+    "id": "fallback-03",
+    "category": "fallback",
+    "query": "What will the quantum computing job market in Antarctica look like in 2040?",
+    "expected_answer": "The assistant should acknowledge limited evidence and avoid pretending it has reliable grounded data.",
+    "expected_contexts": []
+  },
+  {
+    "id": "fallback-04",
+    "category": "fallback",
+    "query": "hello",
+    "expected_answer": "The assistant should return a brief conversational greeting without forced retrieval citations.",
+    "expected_contexts": []
+  }
+]

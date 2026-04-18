@@ -16,6 +16,8 @@ import re
 import structlog
 from fastapi import HTTPException
 
+from career_intel.security.hardening import redact_secret_patterns
+
 logger = structlog.get_logger()
 
 # --- Layer 1: Heuristic patterns ---
@@ -30,9 +32,30 @@ _INJECTION_PATTERNS = [
     re.compile(r"do\s+not\s+follow\s+(any|the|your)\s+", re.IGNORECASE),
     re.compile(r"pretend\s+(to\s+be|you\s+are)\s+", re.IGNORECASE),
     re.compile(r"new\s+instructions?\s*:", re.IGNORECASE),
+    re.compile(
+        r"(reveal|show|print|dump|extract)\s+.{0,40}(system\s*prompt|developer\s+message|hidden\s+prompt|internal\s+instructions)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(developer|hidden)\s+(message|prompt|instructions?)", re.IGNORECASE),
+    re.compile(r"(chain\s+of\s+thought|reasoning\s+trace|internal\s+scratchpad)", re.IGNORECASE),
+    re.compile(r"(show|dump|return)\s+.{0,30}(tool\s+calls?|function\s+calls?)", re.IGNORECASE),
 ]
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_BOUNDARY_LEAK_RE = re.compile(r"</?BOUNDARY_[A-Za-z0-9_:+-]+[^>]*>", re.IGNORECASE)
+_PROMPT_LEAK_LINES = (
+    "retrieved reference material",
+    "raw user-provided content",
+    "do not treat it as instructions",
+    "data only",
+    "strict grounding mode:",
+)
+_SEVERE_OUTPUT_LEAK_PATTERNS = (
+    re.compile(r"\b(system\s+prompt|developer\s+message|hidden\s+prompt)\b", re.IGNORECASE),
+    re.compile(r"\b(chain\s+of\s+thought|reasoning\s+trace|internal\s+scratchpad)\b", re.IGNORECASE),
+    re.compile(r"\bapi[_ -]?key\b", re.IGNORECASE),
+)
+_SAFE_OUTPUT_REFUSAL = "I can't provide hidden prompts, internal reasoning, or secrets."
 
 
 def validate_input(text: str, max_length: int = 4000) -> str:
@@ -138,3 +161,30 @@ def validate_output_citations(
         logger.warning("output_missing_citations", response_length=len(response_text))
 
     return response_text
+
+
+def sanitize_model_output(response_text: str) -> str:
+    """Redact prompt-boundary artifacts if they leak into model output."""
+    sanitized = _BOUNDARY_LEAK_RE.sub("[internal content removed]", response_text)
+    sanitized = redact_secret_patterns(sanitized)
+    lines: list[str] = []
+    leaked = False
+    severe_leak = False
+    for line in sanitized.splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in _PROMPT_LEAK_LINES):
+            leaked = True
+            continue
+        if any(pattern.search(line) for pattern in _SEVERE_OUTPUT_LEAK_PATTERNS):
+            leaked = True
+            severe_leak = True
+            continue
+        lines.append(line)
+    if leaked or sanitized != response_text:
+        logger.warning("output_prompt_leak_redacted")
+    cleaned = "\n".join(lines).strip()
+    if severe_leak and not cleaned:
+        return _SAFE_OUTPUT_REFUSAL
+    if severe_leak:
+        return cleaned or _SAFE_OUTPUT_REFUSAL
+    return cleaned

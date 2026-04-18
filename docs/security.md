@@ -1,85 +1,170 @@
 # Security Architecture
 
+## Threat surface overview
+
+The app’s main security boundaries are:
+
+1. `POST /chat` and `POST /chat/stream` user input.
+2. Uploaded CV and speech files before parsing/transcription.
+3. Retrieved RAG chunks and CV text before they enter synthesis.
+4. BYOK request headers (`X-OpenAI-API-Key`, `X-OpenAI-Model`).
+5. External metadata rendered in the UI (for example YouTube titles, links, thumbnails).
+6. Logs, health endpoints, citations, and source inventory metadata.
+
+The design goal is practical defense-in-depth: block obvious abuse early, treat all retrieved or uploaded content as untrusted data, and fail safely without degrading normal RAG retrieval, reranking, embeddings, or Qdrant behavior.
+
 ## Security pipeline
 
 ```mermaid
 flowchart LR
     req["Incoming Request"] --> val["Pydantic Validation"]
-    val --> len["Length + Content Limits"]
-    len --> L1["Layer 1: Heuristic Regex"]
-    L1 --> L2["Layer 2: Encoded Attack Detection"]
-    L2 --> L3["Layer 3: OpenAI Moderation"]
-    L3 --> rl["Redis Rate Limiting"]
-    rl --> router["Intent Router"]
-    router --> ctx["Context Builder"]
-    ctx --> san["Structural Sanitization<br/>+ Randomized Boundaries"]
+    val --> len["Length + Upload Limits"]
+    len --> rl["Scoped Rate Limit"]
+    rl --> ig["Input Guards"]
+    ig --> router["Router / Retrieval / Tools"]
+    router --> san["Context Sanitization + Boundary Wrapping"]
     san --> llm["LLM Call"]
-    llm --> og["Output Guards"]
+    llm --> og["Output Validation + Redaction"]
     og --> resp["Safe Response"]
 ```
 
-## Multi-layer input guards
+## Protections implemented
 
-| Layer | Implementation | Latency | Fail mode |
-|-------|---------------|---------|-----------|
-| **1 — Heuristic regex** | 10+ compiled patterns for injection phrases, HTML tags, role-play | <1ms | Block on match |
-| **2 — Encoded attacks** | Base64 decode + check, Unicode BiDi, zero-width chars | <1ms | Block on match |
-| **3 — Moderation classifier** | OpenAI moderation API for paraphrased/multilingual attacks | 100-300ms | Fail-open if unreachable |
-| **Rate limiting** | Redis sorted-set sliding window, keyed by IP + session | <5ms | Dev: fail-open; Prod: fail-closed |
+### 1. Prompt injection defense
 
-## CV security
+| Layer | Implementation | Behavior |
+|-------|---------------|----------|
+| User-input heuristics | Regex screening for prompt override, hidden prompt probing, developer-message extraction, chain-of-thought requests, and encoded attacks | Block request with a generic rephrase message |
+| Encoded attack checks | Base64 keyword scan, BiDi controls, zero-width character detection | Block request |
+| Moderation classifier | OpenAI moderation as a secondary safety layer | Block on flag; fail-open only if upstream moderation is unavailable |
+| System prompt hardening | Explicit rules that retrieved chunks, CVs, source inventory data, and external metadata are untrusted reference material only | Prevents model from treating content as instructions |
+| Boundary wrapping | Randomized `<BOUNDARY_...>` wrappers around retrieved context and CV content | Stops delimiter spoofing and role-breakout attacks |
+| Retrieval sanitization | Structural delimiter stripping plus control-character removal before synthesis | Preserves facts while neutralizing prompt-like framing |
 
-### Upload validation
-- File type whitelist: `.pdf`, `.docx`, `.txt` only
-- Size limit: 5 MB (configurable via `max_cv_file_bytes`)
-- Empty file / empty filename rejection
+Notes:
 
-### Sanitization (two-tier)
+- Retrieved chunks are wrapped as untrusted reference material, not executable instructions.
+- CV content is treated as data only and never as tool/system/user instructions.
+- Graceful refusal is intentionally generic so the app does not leak internal rules while rejecting abusive prompts.
 
-| Tier | Action | Examples |
-|------|--------|---------|
-| **Structural** (always stripped) | Remove delimiter-like markers | `[INST]`, `<\|im_start\|>`, `<<<...>>>`, `<BOUNDARY_...>`, `---`, `### System` |
-| **Behavioral** (scored, not stripped) | Risk-score injection phrases | "ignore instructions", "override rules", "reveal system prompt" |
+### 2. File upload validation
 
-### Risk scoring
-- Each behavioral pattern carries a weight (0.0–1.0)
-- Score = max weight of matched patterns
-- Flagged if score >= 0.5
-- Risk score returned in `/cv/process` response for caller decision
-- Flagged CVs logged (without content) for monitoring
+#### CV uploads
 
-### Prompt boundaries
-- Per-request randomized boundary tokens via `secrets.choice`
-- CV wrapped in `<BOUNDARY_xxx:USER_CV>` with explicit "DATA ONLY" instruction
-- System prompt rules 8-10 instruct the LLM to treat boundary content as passive data
+- Strict allowlist: `.pdf`, `.docx`, `.txt`.
+- File-size limit: `max_cv_file_bytes` (default 5 MB).
+- Safe filename normalization strips path segments and control characters before logging or parsing.
+- Fake extension defense:
+  - PDF must start with `%PDF-`.
+  - DOCX must be a valid zip archive containing `word/document.xml`.
+  - TXT rejects binary/null-byte payloads.
+- Parser failures return generic client-safe errors without backend exception details.
 
-## Output guards
+#### Speech uploads
 
-| Guard | Implementation |
-|-------|---------------|
-| Citation integrity | Validate `[n]` references map to retrieved chunk IDs |
-| Schema validation | Tool outputs validated against Pydantic schemas |
-| Weak evidence abstention | Template response when all retrieval scores < 0.30 |
+- Strict extension and MIME checks.
+- Basic magic-byte checks for declared audio type.
+- Safe filename normalization before logs/provider calls.
+- Transcripts remain untrusted until the user submits them through the normal chat path.
 
-## Rate limiting
+### 3. Output validation and sanitization
 
-- **Backend:** Redis sorted-set sliding window
-- **Keys:** `ratelimit:ip:{client_ip}` and `ratelimit:session:{session_id}`
-- **Applied to:** `/chat`, `/chat/stream`, `/ingest`, `/feedback`
-- **Dev fallback:** fail-open when Redis unavailable
-- **Production:** fail-closed (503)
+- Prompt-boundary markers are stripped from model output.
+- Output lines that expose hidden prompt material, developer messages, chain-of-thought, or internal scratchpad content are removed.
+- Secret-like values are redacted from output if they appear.
+- If a severe leak leaves no safe content, the app falls back to a short refusal rather than returning internal data.
+- RAG answers must cite valid retrieved chunks; invalid citation IDs are rejected during generation.
+- Citations only expose public HTTP(S) URIs. Local file paths are not returned to clients.
 
-## Secret management
+### 4. API key and secret handling
 
-- All secrets via environment variables, loaded through Pydantic `SecretStr`
-- Admin endpoints require `X-Admin-Secret` header
-- CV content never logged — only metadata (filename, byte size, risk score)
-- `.env` excluded from version control
+- All backend secrets load through Pydantic `SecretStr`.
+- Structured logs pass through a redaction processor that masks secrets and strips raw user-text previews.
+- BYOK keys are request-scoped on the backend via context variables and are not persisted in server config.
+- The Streamlit BYOK input field is cleared immediately after successful validation.
+- Unsupported model overrides are rejected server-side, even if a client bypasses UI controls.
+- Admin authentication uses constant-time comparison.
+- In staging/production, admin endpoints fail closed if the default admin secret is still configured.
 
-## Known limitations
+### 5. Rate limiting and abuse prevention
 
-- Heuristic regex is English-only; multilingual injection relies on Layer 3 (moderation API)
-- OpenAI moderation is designed for content policy, not prompt injection specifically
-- Novel attack vectors (encoded, Unicode homoglyphs) may bypass all layers
-- Very short/ambiguous injections may evade heuristics
-- Defense-in-depth via sanitization and output guards remains essential
+Backend rate limiting uses Redis sliding windows keyed by both IP and session ID, with separate scopes:
+
+- `chat`: `/chat`, `/chat/stream`
+- `speech`: `/speech/*`
+- `provider_auth`: `/health/provider-auth`
+- `feedback`: `/feedback`
+- `ingest`: `/ingest`
+
+Defaults:
+
+- Chat: 30 rpm
+- Speech: 10 rpm
+- BYOK validation: 10 rpm
+- Feedback: 20 rpm
+- Ingest: 5 rpm
+
+Fail behavior:
+
+- Development: Redis outage fails open for availability.
+- Staging/production: Redis outage fails closed with HTTP 503.
+
+The Streamlit client also keeps lightweight per-session throttles for chat, BYOK validation, and optional YouTube enrichment so the UI can back off before sending unnecessary traffic.
+
+### 6. Retrieval context and source sanitization
+
+- Retrieved chunks pass through structural delimiter stripping and control-character cleanup.
+- Citation metadata is preserved, but local-path URIs are removed from client payloads.
+- Source inventory returns file basenames only, not repo-relative or absolute paths.
+- Admin-triggered ingestion is constrained to the configured raw-data root (`data/raw` by default).
+
+### 7. External source safety
+
+- YouTube suggestions stay UI-only and never enter the RAG context.
+- Titles/channel names are HTML-escaped before rendering.
+- Video links are restricted to YouTube hosts.
+- Thumbnail links are restricted to trusted thumbnail host suffixes.
+- Invalid or suspicious links are dropped instead of rendered.
+
+### 8. Logging hygiene
+
+- Raw API keys and secret-like strings are masked automatically.
+- Raw user query previews are replaced with content-free descriptors in structured logs.
+- CV text, transcripts, and model responses are not logged in full.
+- Health endpoints return reduced dependency-error detail outside development.
+- Remaining verbose console traces are limited to development-only paths.
+
+### 9. Secure defaults
+
+- Supported chat models are restricted by backend allowlist.
+- Default answer mode remains grounded and citation-aware when evidence exists.
+- External enrichment silently disables when its key is missing.
+- Debug-oriented dependency details are suppressed outside development.
+- Admin routes are unusable in staging/production until a non-default secret is configured.
+
+## Recommended production deployment practices
+
+1. Run behind a trusted reverse proxy that sets `X-Forwarded-For` correctly.
+2. Use TLS for all client-to-backend traffic, especially when BYOK is enabled.
+3. Store `OPENAI_API_KEY`, `ADMIN_SECRET`, and database credentials in a real secret manager.
+4. Keep Redis highly available; production rate limiting intentionally fails closed if Redis is down.
+5. Disable public access to admin ingestion routes except from trusted operator networks.
+6. Keep `environment=production` and avoid development logging in deployed environments.
+7. Monitor repeated 400/403/429 responses as likely abuse or probing.
+
+## Remaining limitations
+
+- Heuristic prompt-injection screening is still strongest in English.
+- OpenAI moderation is not purpose-built for prompt injection and remains a secondary control.
+- Sophisticated semantic prompt injections can still appear inside otherwise legitimate documents.
+- Client-side YouTube throttling is a UX safeguard, not a trusted enforcement boundary.
+- The UI stores a validated BYOK key in Streamlit session state for the active session by design.
+
+## Validation checklist covered in tests
+
+- Prompt-injection attempts and hidden-prompt exfiltration patterns.
+- Fake CV upload cases (malformed PDF/DOCX, binary TXT).
+- Secret masking and log redaction helpers.
+- Endpoint-specific rate-limit policy mapping.
+- Output leakage redaction for prompt/secret artifacts.
+- Unsafe external metadata rendering and URL rejection.

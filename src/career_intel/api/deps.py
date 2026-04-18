@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from typing import Annotated
 
@@ -36,7 +37,13 @@ async def require_admin(
 ) -> None:
     """Gate admin-only endpoints behind the shared admin secret."""
     expected = settings.admin_secret.get_secret_value()
-    if not x_admin_secret or x_admin_secret != expected:
+    if (
+        settings.environment in {"staging", "production"}
+        and expected == "change-me-in-production"
+    ):
+        logger.error("admin_auth_unconfigured")
+        raise HTTPException(status_code=503, detail="Admin endpoint is not configured.")
+    if not x_admin_secret or not secrets.compare_digest(x_admin_secret, expected):
         logger.warning("auth_failed", endpoint="admin")
         raise HTTPException(status_code=403, detail="Invalid or missing admin secret.")
 

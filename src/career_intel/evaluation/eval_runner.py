@@ -20,8 +20,11 @@ GOLDEN_DATASET_PATH = Path(__file__).parent / "datasets" / "golden_queries.json"
 
 _INTENT_TAG_MAP = {
     "small_talk": "small_talk",
-    "direct_answer": "direct_answer",
-    "retrieval_required": "retrieval_required",
+    "general_knowledge": "general_knowledge",
+    "direct_answer": "general_knowledge",
+    "domain_specific": "domain_specific",
+    "retrieval_required": "domain_specific",
+    "dynamic_runtime": "dynamic_runtime",
     "tool_required": "tool_required",
 }
 
@@ -107,11 +110,11 @@ def check_routing_accuracy(
         if behaviour.startswith("use_tool:"):
             expected_intent = "tool_required"
         elif behaviour == "abstain" or behaviour == "cite_source":
-            expected_intent = "retrieval_required"
+            expected_intent = "domain_specific"
         elif behaviour == "small_talk":
             expected_intent = "small_talk"
         elif behaviour == "use_cv":
-            expected_intent = "retrieval_required"
+            expected_intent = "domain_specific"
 
     return {
         "query": example.query,

@@ -2,8 +2,8 @@
 
 Verifies that:
 - small_talk skips retrieval and returns no sources
-- direct_answer skips retrieval and returns no sources
-- retrieval_required triggers retrieval
+- general_knowledge skips retrieval and returns no sources
+- domain_specific triggers retrieval
 - require_citations flag does not force retrieval for small_talk
 - streaming fast-path yields tokens without retrieval
 """
@@ -17,7 +17,22 @@ import pytest
 
 from career_intel.orchestration.synthesize import generate_direct_response
 from career_intel.schemas.domain import RouterDecision
-from career_intel.tools.registry import _normalize_decision
+from career_intel.tools.registry import (
+    _apply_domain_trend_retrieval_bias,
+    _apply_named_source_retrieval_bias,
+    _normalize_decision,
+)
+
+
+def _settings(**kwargs: object) -> SimpleNamespace:
+    base: dict[str, object] = {
+        "max_input_length": 4000,
+        "rag_similarity_threshold": 0.30,
+        "rag_weak_evidence_threshold": 0.30,
+        "rag_strong_evidence_threshold": 0.55,
+    }
+    base.update(kwargs)
+    return SimpleNamespace(**base)
 
 
 class TestDirectResponse:
@@ -32,13 +47,13 @@ class TestDirectResponse:
         from career_intel.orchestration import synthesize as synth_module
         monkeypatch.setattr(synth_module, "get_chat_llm", lambda settings, temperature=0.7: FakeLLM())
 
-        reply = await generate_direct_response("hello", settings=SimpleNamespace())
+        reply, _usage = await generate_direct_response("hello", settings=SimpleNamespace())
         assert "Hello" in reply or "hello" in reply.lower()
         assert "[1]" not in reply
 
 
 class TestRunTurnIntentGating:
-    """run_turn skips retrieval for small_talk/direct_answer."""
+    """run_turn skips retrieval for small_talk/general_knowledge."""
 
     @pytest.mark.asyncio
     async def test_small_talk_no_retrieval_no_sources(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,8 +70,8 @@ class TestRunTurnIntentGating:
             reason="greeting",
         )
 
-        async def fake_route_query(query: str, *, cv_available: bool = False, settings: Any = None) -> RouterDecision:
-            return fake_router_decision
+        async def fake_route_query(query: str, *, cv_available: bool = False, settings: Any = None) -> tuple[Any, None]:
+            return fake_router_decision, None
 
         async def fake_validate(text: str, max_length: int = 4000) -> str:
             return text
@@ -80,13 +95,14 @@ class TestRunTurnIntentGating:
             session_id="test-session",
             use_tools=True,
             filters=None,
-            settings=SimpleNamespace(max_input_length=4000),
+            settings=_settings(),
             trace_id="test-trace",
         )
 
         assert result.intent == "small_talk"
         assert result.citations == []
         assert result.tool_calls == []
+        assert result.answer_source == "llm_fallback"
         assert len(result.reply) > 0
 
     @pytest.mark.asyncio
@@ -105,8 +121,8 @@ class TestRunTurnIntentGating:
             reason="greeting",
         )
 
-        async def fake_route_query(query: str, *, cv_available: bool = False, settings: Any = None) -> RouterDecision:
-            return fake_router_decision
+        async def fake_route_query(query: str, *, cv_available: bool = False, settings: Any = None) -> tuple[Any, None]:
+            return fake_router_decision, None
 
         async def fake_validate(text: str, max_length: int = 4000) -> str:
             return text
@@ -130,7 +146,7 @@ class TestRunTurnIntentGating:
             session_id="test-session",
             use_tools=True,
             filters=None,
-            settings=SimpleNamespace(max_input_length=4000),
+            settings=_settings(),
             trace_id="test-trace",
         )
 
@@ -155,8 +171,8 @@ class TestStreamTurnIntentGating:
             reason="greeting",
         )
 
-        async def fake_route_query(query: str, *, cv_available: bool = False, settings: Any = None) -> RouterDecision:
-            return fake_router_decision
+        async def fake_route_query(query: str, *, cv_available: bool = False, settings: Any = None) -> tuple[Any, None]:
+            return fake_router_decision, None
 
         async def fake_validate(text: str, max_length: int = 4000) -> str:
             return text
@@ -195,7 +211,7 @@ class TestStreamTurnIntentGating:
             session_id="test-session",
             use_tools=True,
             filters=None,
-            settings=SimpleNamespace(max_input_length=4000),
+            settings=_settings(),
             trace_id="test-trace",
         ):
             if sse_line.startswith("data: "):
@@ -214,6 +230,8 @@ class TestStreamTurnIntentGating:
         assert "status" not in event_types
 
         assert event_types[-1] == "done"
+        debug_event = next(e for e in events if e["type"] == "debug")
+        assert debug_event["data"]["answer_source"] == "llm_fallback"
 
 
 class TestNormalizeDecisionIntents:
@@ -226,9 +244,9 @@ class TestNormalizeDecisionIntents:
         assert decision.tool_name is None
 
     def test_retrieval_intent(self) -> None:
-        parsed = {"intent": "retrieval_required", "confidence": 0.8, "reason": "needs facts"}
+        parsed = {"intent": "domain_specific", "confidence": 0.8, "reason": "needs facts"}
         decision = _normalize_decision(parsed, cv_available=False)
-        assert decision.intent == "retrieval_required"
+        assert decision.intent == "domain_specific"
 
     def test_tool_intent(self) -> None:
         parsed = {
@@ -240,3 +258,95 @@ class TestNormalizeDecisionIntents:
         decision = _normalize_decision(parsed, cv_available=False)
         assert decision.intent == "tool_required"
         assert decision.tool_name == "skill_gap"
+
+
+class TestNamedSourceBias:
+    def test_named_source_query_is_biased_to_retrieval(self) -> None:
+        decision = RouterDecision(
+            intent="general_knowledge",
+            confidence=0.8,
+            tool_name=None,
+            params={},
+            use_cv=False,
+            reason="generic fact",
+        )
+
+        adjusted = _apply_named_source_retrieval_bias(
+            "What does WEF Future of Jobs 2025 say about green jobs?",
+            decision,
+        )
+
+        assert adjusted.intent == "domain_specific"
+        assert adjusted.tool_name is None
+
+    def test_tool_required_is_not_overridden_by_named_source_bias(self) -> None:
+        decision = RouterDecision(
+            intent="tool_required",
+            confidence=0.9,
+            tool_name="role_compare",
+            params={"role_a": "data engineer", "role_b": "data scientist"},
+            use_cv=False,
+            reason="comparison request",
+        )
+
+        adjusted = _apply_named_source_retrieval_bias(
+            "Compare ESCO data engineer and data scientist roles.",
+            decision,
+        )
+
+        assert adjusted.intent == "tool_required"
+        assert adjusted.tool_name == "role_compare"
+
+
+class TestDomainTrendBias:
+    def test_data_ai_trend_query_is_biased_to_retrieval(self) -> None:
+        decision = RouterDecision(
+            intent="general_knowledge",
+            confidence=0.75,
+            tool_name=None,
+            params={},
+            use_cv=False,
+            reason="broad question",
+        )
+
+        adjusted = _apply_domain_trend_retrieval_bias(
+            "What future trends are shaping data and AI careers?",
+            decision,
+        )
+
+        assert adjusted.intent == "domain_specific"
+        assert adjusted.tool_name is None
+
+    def test_non_domain_trend_query_is_not_biased(self) -> None:
+        decision = RouterDecision(
+            intent="general_knowledge",
+            confidence=0.8,
+            tool_name=None,
+            params={},
+            use_cv=False,
+            reason="broad question",
+        )
+
+        adjusted = _apply_domain_trend_retrieval_bias(
+            "What future trends are shaping healthcare policy?",
+            decision,
+        )
+
+        assert adjusted.intent == "general_knowledge"
+
+    def test_small_talk_is_not_overridden(self) -> None:
+        decision = RouterDecision(
+            intent="small_talk",
+            confidence=0.95,
+            tool_name=None,
+            params={},
+            use_cv=False,
+            reason="greeting",
+        )
+
+        adjusted = _apply_domain_trend_retrieval_bias(
+            "Thanks",
+            decision,
+        )
+
+        assert adjusted.intent == "small_talk"

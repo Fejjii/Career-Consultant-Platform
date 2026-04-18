@@ -7,6 +7,8 @@ import sys
 
 import structlog
 
+from career_intel.security.hardening import redact_log_event
+
 
 def setup_logging(log_level: str = "INFO", json_output: bool | None = None) -> None:
     """Configure structlog + stdlib logging for the whole application.
@@ -31,6 +33,7 @@ def setup_logging(log_level: str = "INFO", json_output: bool | None = None) -> N
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
+        redact_log_event,
     ]
 
     if json_output:

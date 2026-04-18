@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
 from pathlib import Path
 
 import structlog
 import tiktoken
+
+from career_intel.security.hardening import sanitize_upload_filename
 
 logger = structlog.get_logger()
 
@@ -24,6 +27,7 @@ SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 _DEFAULT_MAX_TOKENS = 3000
 _DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
 _ENCODING_NAME = "cl100k_base"
+_TEXT_NULL_BYTE_LIMIT = 0
 
 
 class CVProcessingError(Exception):
@@ -35,7 +39,7 @@ def validate_cv_upload(
     filename: str,
     *,
     max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
-) -> None:
+) -> str:
     """Pre-flight validation before expensive parsing.
 
     Raises ``CVProcessingError`` if the file is invalid.
@@ -43,7 +47,8 @@ def validate_cv_upload(
     if not filename or not filename.strip():
         raise CVProcessingError("Filename is required.")
 
-    ext = Path(filename).suffix.lower()
+    safe_filename = sanitize_upload_filename(filename, default_name="resume.txt")
+    ext = Path(safe_filename).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise CVProcessingError(
             f"Unsupported file type '{ext}'. "
@@ -59,6 +64,9 @@ def validate_cv_upload(
         raise CVProcessingError(
             f"File too large ({size_mb} MB). Maximum allowed is {limit_mb} MB."
         )
+
+    _validate_file_signature(data, ext)
+    return safe_filename
 
 
 def extract_text_from_bytes(data: bytes, filename: str) -> str:
@@ -93,8 +101,8 @@ def extract_text_from_bytes(data: bytes, filename: str) -> str:
     except CVProcessingError:
         raise
     except Exception as exc:
-        logger.error("cv_extraction_failed", filename=filename, error=str(exc)[:200])
-        raise CVProcessingError(f"Failed to extract text from '{filename}': {exc}") from exc
+        logger.error("cv_extraction_failed", filename=filename, error_type=type(exc).__name__)
+        raise CVProcessingError("Failed to extract text from the uploaded file.") from exc
 
 
 def _extract_pdf(data: bytes) -> str:
@@ -119,6 +127,28 @@ def _extract_docx(data: bytes) -> str:
     if not paragraphs:
         raise CVProcessingError("DOCX contains no text content.")
     return "\n".join(paragraphs)
+
+
+def _validate_file_signature(data: bytes, ext: str) -> None:
+    """Validate the content shape for the declared file extension."""
+
+    if ext == ".pdf":
+        if not data.startswith(b"%PDF-"):
+            raise CVProcessingError("The uploaded PDF appears malformed or does not match its extension.")
+        return
+    if ext == ".docx":
+        if not data.startswith(b"PK"):
+            raise CVProcessingError("The uploaded DOCX appears malformed or does not match its extension.")
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                names = set(archive.namelist())
+        except zipfile.BadZipFile as exc:
+            raise CVProcessingError("The uploaded DOCX appears malformed or unreadable.") from exc
+        if "word/document.xml" not in names:
+            raise CVProcessingError("The uploaded DOCX appears malformed or unreadable.")
+        return
+    if ext == ".txt" and data.count(b"\x00") > _TEXT_NULL_BYTE_LIMIT:
+        raise CVProcessingError("Plain-text uploads cannot contain binary content.")
 
 
 def clean_cv_text(text: str) -> str:
@@ -156,9 +186,9 @@ def process_cv(
     Returns the processed CV text ready for prompt injection (after sanitization).
     Raw CV content is never logged — only safe metadata.
     """
-    validate_cv_upload(data, filename, max_file_bytes=max_file_bytes)
+    safe_filename = validate_cv_upload(data, filename, max_file_bytes=max_file_bytes)
 
-    raw = extract_text_from_bytes(data, filename)
+    raw = extract_text_from_bytes(data, safe_filename)
     cleaned = clean_cv_text(raw)
     if not cleaned:
         raise CVProcessingError("CV appears to be empty after text extraction.")
@@ -166,7 +196,7 @@ def process_cv(
 
     logger.info(
         "cv_processed",
-        filename=filename,
+        filename=safe_filename,
         raw_bytes=len(data),
         extracted_chars=len(cleaned),
         final_chars=len(truncated),

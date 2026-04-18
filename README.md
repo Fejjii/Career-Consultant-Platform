@@ -9,13 +9,15 @@ A production-grade career copilot that provides **retrieval-grounded**, **CV-awa
 ```mermaid
 flowchart TB
     subgraph client ["Client Layer"]
-        UI["Streamlit UI<br/>(chat + CV upload + sources panel)"]
+        UI["Streamlit UI<br/>(chat + mic + CV + sources)"]
+        Mic["Browser MediaRecorder<br/>(st_audiorec → WAV)"]
     end
 
     subgraph api ["API Layer (FastAPI)"]
         Chat["POST /chat"]
         Stream["POST /chat/stream (SSE)"]
         CV["POST /cv/process"]
+        Speech["POST /speech/transcribe"]
         Health["GET /health/*"]
         Guards["Input Guards + Rate Limiting"]
     end
@@ -31,6 +33,7 @@ flowchart TB
     subgraph rag ["RAG Layer"]
         Rewrite["Query Rewriter"]
         Retriever["Multi-query Retriever"]
+        Reranker["Deterministic Reranker<br/>(optional via config)"]
         Chunks["Chunk Builder + Citation Map"]
     end
 
@@ -44,15 +47,17 @@ flowchart TB
         OpenAI["OpenAI API<br/>(Chat + Embeddings + Moderation)"]
     end
 
+    Mic --> UI
     UI -->|"HTTP/JSON + SSE"| api
     Chat --> Guards --> Chain
     Stream --> Guards --> Chain
     CV --> Guards
+    Speech -->|"multipart audio"| OpenAI
 
     Chain --> Router
-    Router -->|"small_talk / direct_answer"| Synth
-    Router -->|"retrieval_required / tool_required"| Rewrite
-    Rewrite --> Retriever --> Chunks --> CTX --> Synth
+    Router -->|"small_talk / general_knowledge"| Synth
+    Router -->|"domain_specific"| Rewrite
+    Rewrite --> Retriever --> Reranker --> Chunks --> CTX --> Synth
     Router -->|"tool_required"| Tools --> Synth
 
     Retriever --> Qdrant
@@ -64,12 +69,13 @@ flowchart TB
 
 | Feature | Description |
 |---------|-------------|
-| **Intent-first routing** | LLM classifies intent (small_talk, direct_answer, retrieval_required, tool_required) before deciding actions |
-| **Advanced RAG** | Query rewriting, multi-query retrieval, metadata filtering, weak-evidence abstention, citation-grounded answers |
+| **Intent-first routing** | LLM classifies intent (small_talk, general_knowledge, domain_specific, tool_required, dynamic_runtime) before deciding actions, with calibrated domain-trend bias for data/AI labor-market queries |
+| **Advanced RAG** | Query rewriting, multi-query retrieval, profile-aware deterministic reranking, metadata filtering, weak-evidence abstention, citation-grounded answers |
 | **CV-aware assistance** | Secure CV upload, token-safe processing, risk scoring, CV context included only when relevant |
 | **Tool calling** | Skill gap analyzer, role comparison, learning plan generator |
 | **End-to-end streaming** | SSE streaming with fast-path for conversational intents, status events for retrieval |
-| **Multi-layer security** | Heuristic guards, encoded-attack detection, OpenAI moderation, structural sanitization, randomized boundaries, rate limiting |
+| **Speech-to-text** | In-app mic (`streamlit-audiorec` / MediaRecorder → WAV) or sidebar file upload → `POST /speech/transcribe` → editable transcript → normal chat pipeline |
+| **Multi-layer security** | Heuristic guards, encoded-attack detection, OpenAI moderation, structural sanitization, randomized boundaries, output redaction, model-override allowlisting, scoped rate limiting |
 | **Evaluation framework** | Golden dataset, routing accuracy checks, citation integrity, retrieval hit metrics |
 
 ## Quickstart
@@ -122,18 +128,18 @@ uv run python -m pytest tests/ --ignore=tests/integration -v
 ```
 src/career_intel/
   config/          # Pydantic BaseSettings, env loading
-  api/             # FastAPI routers (chat, cv, health, ingest, feedback, evaluation, metrics)
+  api/             # FastAPI routers (chat, cv, speech, health, ingest, feedback, evaluation, metrics)
   orchestration/   # Chain, stream engine, context builder, prompts, synthesizer
   rag/             # Ingestion, chunking, embeddings, retrieval, citation mapping
   tools/           # Intent-first router, skill gap, role compare, learning plan
   security/        # Multi-layer guards, sanitization, risk scoring, rate limiting
-  services/        # CV processor (extract, clean, truncate)
+  services/        # CV processor; speech transcription (isolated from orchestration)
   storage/         # Postgres, Redis, Qdrant client wrappers
   llm/             # Centralized LLM/embedding client factory with retry/backoff
   logging/         # Structured logging setup
   schemas/         # Shared Pydantic models (API + domain + routing)
   evaluation/      # Golden datasets, eval runner, routing accuracy, metrics
-streamlit_app/     # Streamlit frontend
+streamlit_app/     # Streamlit UI; audiorec bridge (keyed mic) + speech_client (HTTP to /speech/transcribe)
 tests/             # Unit, orchestration, RAG, security, API, tool tests
 docs/              # Architecture, security, evaluation, RAG pipeline docs
 ```
@@ -159,11 +165,11 @@ sequenceDiagram
     L-->>R: {intent, tool, use_cv}
     R-->>A: RouterDecision
 
-    alt intent = small_talk / direct_answer
+    alt intent = small_talk / general_knowledge
         A->>L: stream direct response
         L-->>U: SSE tokens (fast path)
-    else intent = retrieval_required / tool_required
-        A->>RAG: rewrite + retrieve
+    else intent = domain_specific / tool_required
+        A->>RAG: rewrite + retrieve + rerank (optional)
         RAG-->>A: chunks
         opt intent = tool_required
             A->>T: execute_tool
@@ -197,21 +203,114 @@ sequenceDiagram
     Note over ST,API: On subsequent chat, cv_text is included<br/>in request body only when router says use_cv=true
 ```
 
+## Speech-to-text flow
+
+**Primary:** the main chat area embeds the [`streamlit-audiorec`](https://pypi.org/project/streamlit-audiorec/) component (browser **MediaRecorder** → WAV in the iframe). When you finish a clip, Python receives WAV bytes and calls `POST /speech/transcribe` with header `X-Speech-Source: mic`. A **keyed wrapper** (`streamlit_app/audiorec_bridge.py`) remounts the component after each clip so the same recording is not transcribed twice on every rerun.
+
+**Fallback:** sidebar multipart upload with `X-Speech-Source: upload`.
+
+In both cases, a successful transcript is inserted into the speech draft and then auto-queued through the normal chat path. If a draft remains visible after an interrupted send, you can still edit/resend or discard it. `POST /chat` and `POST /chat/stream` are unchanged.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant BR as Browser (MediaRecorder)
+    participant ST as Streamlit
+    participant SP as POST /speech/transcribe
+    participant OA as OpenAI (Whisper)
+    participant CH as POST /chat or /stream
+
+    U->>BR: click record / stop (user gesture)
+    BR-->>ST: WAV bytes via st_audiorec iframe
+    ST->>SP: multipart file + X-Speech-Source: mic
+    SP->>SP: validate size, type, magic bytes
+    SP->>OA: transcribe
+    OA-->>SP: text (+ optional language/duration)
+    SP-->>ST: JSON transcript
+    ST->>ST: draft visible in UI
+    ST->>CH: auto-queue transcript through normal chat path
+    ST->>CH: same payload as typed chat (messages + session_id + cv_text)
+    CH-->>ST: normal assistant reply (RAG/tools/streaming as usual)
+```
+
+### Configuration
+
+| Variable | Purpose |
+|----------|---------|
+| `MAX_SPEECH_FILE_BYTES` | Max upload size (default 25 MB) |
+| `SPEECH_ALLOWED_EXTENSIONS` | Comma-separated list (default `wav,mp3,m4a,webm`) |
+| `OPENAI_TRANSCRIPTION_MODEL` | e.g. `whisper-1` |
+| `SPEECH_TRANSCRIPTION_TIMEOUT_SECONDS` | Client timeout for the transcription HTTP call |
+| `X-Speech-Source` (request header) | Optional: `mic` or `upload` for structured logs (`speech_upload_received`, `transcription_*`) |
+
+### Manual test checklist (speech)
+
+1. Start the API and `uv run streamlit run streamlit_app/app.py` (localhost is a secure context for `getUserMedia`).
+2. Record a short phrase with the in-app recorder; confirm a transcript appears and is auto-queued through the usual chat path.
+3. If a draft remains visible after an interrupted send, edit/resend or discard it and confirm the assistant responds through the usual chat/streaming path.
+4. Click **Discard transcript** and confirm the draft clears and you can record again.
+5. Block microphone in the browser; confirm the caption suggests sidebar upload; upload a small `.wav` and use **Transcribe file**.
+6. Use **New** in the sidebar and confirm speech draft and mic remount state reset.
+
+### API: `POST /speech/transcribe`
+
+- **Request:** multipart field `file` (audio).
+- **Success:** `{ "text", "provider", "language", "duration_seconds", "warnings" }`.
+- **Errors:** `400` invalid/empty/corrupt, `413` too large, `422` empty transcript after normalization, `502` provider failure.
+- **Development:** response may include header `X-Transcription-Latency-Ms`.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Security](docs/security.md)
+
+Production note: uploaded CV/audio inputs are validated before parsing or transcription, unsupported BYOK model overrides are rejected server-side, and citations do not expose local file paths.
 - [RAG Pipeline](docs/rag_pipeline.md)
 - [Evaluation](docs/evaluation.md)
 - [Workflows](docs/workflows.md)
 
+## Data sources
+
+- **ESCO**: occupations, skills, occupation-skill relations, ISCO groups, and skills hierarchy are used to generate structured ESCO documents for retrieval.
+- **WEF**: Future of Jobs reports (2018, 2020, 2023, 2025) are ingested for labor-market trends and demand signals.
+
+## Evaluation
+
+- **Golden dataset concept**: curated prompts cover domain-specific, fallback, and source-sensitive behaviors to detect regressions in routing and grounding.
+- **RAGAS setup**: offline evaluation scripts score grounding and answer quality (faithfulness, relevancy, context precision/recall) and write timestamped reports under `reports/ragas/`.
+
 ## Known limitations
 
-- The router relies on a single LLM call; misclassification is possible for ambiguous queries
+- The router relies on a single LLM call; ambiguous phrasing can still misclassify despite domain-trend calibration
 - Multilingual injection detection depends on OpenAI's moderation API coverage
 - CV parsing supports PDF/DOCX/TXT only; scanned/image-only PDFs will fail
+- Mic capture requires a **secure context** (HTTPS or localhost); denied permissions show a short caption — use sidebar upload as fallback
+- No live/streaming transcription (record → stop → batch transcribe only)
 - No user authentication; sessions are browser-local
-- Retrieval quality depends on the ingested knowledge base
+- ESCO coverage is still partial in some occupation-skill relation pathways
+- YouTube integration is not yet available in the runtime retrieval path
+- Retrieval sufficiency remains a gap for edge-case queries with sparse corpus evidence
+
+## Next steps
+
+- Improve routing robustness beyond single-pass intent classification.
+- Add retrieval-quality gating to better detect insufficient evidence before synthesis.
+- Extend corpus coverage (deeper ESCO backfill plus additional trusted external sources).
+
+## RAG runtime flags
+
+| Variable | Purpose |
+|----------|---------|
+| `RAG_ENABLE_RERANKING` | Enables post-retrieval deterministic reranking (`true` by default). When `false`, vector-search order is preserved and only top-k truncation is applied. |
+
+### Profile-aware reranking behavior
+
+- `esco_relation`: strong relation-centric reranking; prioritizes `relation_detail` / `relation_summary`.
+- `esco_taxonomy`: taxonomy-pure reranking; strongly prioritizes `taxonomy_mapping` / `isco_group_summary` and penalizes low-signal relation bleed.
+- `esco_general`: balanced lexical + metadata reranking across ESCO summaries and relations.
+- `wef_general`: light reranking suitable for WEF report passages; no ESCO-specific boosts.
+
+Profile selection occurs after retrieval candidate creation and before final `rag_top_k` chunk selection.
 
 ## License
 

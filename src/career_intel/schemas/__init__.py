@@ -1,4 +1,5 @@
 from career_intel.schemas.api import (
+    AnswerLengthMode,
     ChatMessage,
     ChatRequest,
     ChatResponse,
@@ -7,10 +8,12 @@ from career_intel.schemas.api import (
     HealthResponse,
     ReadyDetail,
     ReadyResponse,
+    TokenUsage,
     ToolCallResult,
 )
 
 __all__ = [
+    "AnswerLengthMode",
     "ChatMessage",
     "ChatRequest",
     "ChatResponse",
@@ -19,5 +22,6 @@ __all__ = [
     "HealthResponse",
     "ReadyDetail",
     "ReadyResponse",
+    "TokenUsage",
     "ToolCallResult",
 ]

@@ -22,6 +22,7 @@ from career_intel.storage.qdrant_store import ensure_collection, upsert_vectors
 logger = structlog.get_logger()
 
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".csv"}
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 async def run_ingestion(
@@ -31,6 +32,7 @@ async def run_ingestion(
     """Run the full ingestion pipeline for a list of file paths."""
     settings = get_settings()
     run_id = str(uuid.uuid4())
+    allowed_root = (_PROJECT_ROOT / settings.data_raw_dir).resolve()
 
     # Ensure infrastructure
     ensure_collection()
@@ -45,13 +47,20 @@ async def run_ingestion(
         session.add(ingestion_run)
 
         for path_str in paths:
-            path = Path(path_str)
+            path = Path(path_str).resolve()
             if not path.exists():
                 logger.warning("ingest_file_not_found", path=path_str)
                 continue
 
             if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 logger.warning("ingest_unsupported_extension", path=path_str, ext=path.suffix)
+                continue
+
+            try:
+                relative_uri = str(path.relative_to(_PROJECT_ROOT))
+                path.relative_to(allowed_root)
+            except ValueError:
+                logger.warning("ingest_path_rejected_outside_allowed_root", path=path_str)
                 continue
 
             text = path.read_text(encoding="utf-8")
@@ -63,7 +72,8 @@ async def run_ingestion(
                 "source_type": path.suffix.lstrip("."),
                 "title": path.stem,
                 "parent_doc_id": doc_id,
-                "uri": str(path.resolve()),
+                "uri": relative_uri,
+                "file_name": path.name,
             }
 
             # Chunk
@@ -93,7 +103,7 @@ async def run_ingestion(
             # Record in Postgres
             doc_record = Document(
                 id=doc_id,
-                uri=str(path.resolve()),
+                uri=relative_uri,
                 checksum=checksum,
                 source_type=path.suffix.lstrip("."),
                 title=path.stem,

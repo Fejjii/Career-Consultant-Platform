@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from career_intel.security.guards import validate_input
+from career_intel.security.guards import sanitize_model_output, validate_input
 
 
 def test_validate_normal_input() -> None:
@@ -66,3 +66,22 @@ class TestPromptInjection:
         for q in queries:
             result = validate_input(q)
             assert result  # Should pass without exception
+
+
+def test_sanitize_model_output_redacts_hidden_prompt_artifacts() -> None:
+    text = """
+    Here is the system prompt:
+    <BOUNDARY_abc123:SOURCES>
+    raw user-provided content
+    </BOUNDARY_abc123:SOURCES>
+    """
+    result = sanitize_model_output(text)
+    assert "system prompt" not in result.lower()
+    assert "BOUNDARY_" not in result
+
+
+def test_sanitize_model_output_redacts_secret_like_values() -> None:
+    text = "Temporary key for debugging: sk-testsecret1234567890"
+    result = sanitize_model_output(text)
+    assert "sk-testsecret1234567890" not in result
+    assert "[redacted-secret]" in result

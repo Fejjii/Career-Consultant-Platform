@@ -52,3 +52,13 @@ async def test_cv_process_returns_risk_score(client: AsyncClient) -> None:
     assert data["score"] > 0
     assert data["flagged"] is True
     assert len(data["warnings"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_cv_process_rejects_fake_pdf(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/cv/process",
+        files={"file": ("resume.pdf", b"not-a-real-pdf", "application/pdf")},
+    )
+    assert resp.status_code == 400
+    assert "malformed" in resp.json()["detail"].lower()

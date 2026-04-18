@@ -41,7 +41,9 @@ _STRUCTURAL_PATTERNS = [
     re.compile(r"<\|system\|>|<\|user\|>|<\|assistant\|>", re.IGNORECASE),
     re.compile(r"<<<.+>>>", re.IGNORECASE),
     re.compile(r"<BOUNDARY_[A-Za-z0-9]+", re.IGNORECASE),
+    re.compile(r"```(?:system|assistant|user|tool)?", re.IGNORECASE),
 ]
+_CONTROL_FRAGMENT_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 
 # ── Behavioral patterns ─────────────────────────────────────────────────
 # Phrases that *may* indicate prompt injection.  Scored for risk but NOT
@@ -82,7 +84,7 @@ def sanitize_document_text(text: str) -> str:
     markers.  Does NOT strip behavioral injection phrases (those are
     scored instead — see ``score_cv_risk``).
     """
-    sanitized = text
+    sanitized = _CONTROL_FRAGMENT_RE.sub("", text)
     for pattern in _STRUCTURAL_PATTERNS:
         sanitized = pattern.sub("[redacted-delimiter]", sanitized)
     return sanitized
