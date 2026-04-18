@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from urllib.parse import urlparse
 from typing import Any
 
 import structlog
 from qdrant_client import QdrantClient, models
 
-from career_intel.config import get_settings
+from career_intel.config import Settings, get_settings
 
 logger = structlog.get_logger()
 
@@ -22,11 +24,69 @@ ESCO_DOC_TYPES: tuple[str, ...] = (
 )
 
 
-def get_qdrant_client() -> QdrantClient:
-    settings = get_settings()
+@dataclass(frozen=True, slots=True)
+class ResolvedQdrantConfig:
+    """Cloud-safe Qdrant connection settings."""
+
+    url: str
+    api_key: str | None
+    timeout_seconds: float
+    prefer_grpc: bool
+
+
+class QdrantConfigurationError(ValueError):
+    """Raised when the Qdrant connection settings are invalid."""
+
+
+_QDRANT_BIND_HOSTS = {"0.0.0.0", "::"}
+
+
+def resolve_qdrant_config(settings: Settings | None = None) -> ResolvedQdrantConfig:
+    """Resolve and validate the canonical Qdrant client configuration."""
+    settings = settings or get_settings()
+    raw_url = settings.qdrant_url.strip()
+    if not raw_url:
+        raise QdrantConfigurationError("QDRANT_URL is not configured.")
+
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise QdrantConfigurationError(
+            "QDRANT_URL must be a full http(s) URL, for example "
+            "'https://your-cluster.cloud.qdrant.io'."
+        )
+
+    host = (parsed.hostname or "").strip().lower()
+    if host in _QDRANT_BIND_HOSTS:
+        raise QdrantConfigurationError(
+            "QDRANT_URL points to a bind address that clients cannot reach. "
+            "Use the actual Qdrant hostname instead of 0.0.0.0/::."
+        )
+
+    api_key = settings.qdrant_api_key.get_secret_value().strip() if settings.qdrant_api_key else ""
+    if _qdrant_requires_api_key(host) and not api_key:
+        raise QdrantConfigurationError(
+            "QDRANT_API_KEY is required for this Qdrant host."
+        )
+    if _qdrant_requires_api_key(host) and parsed.scheme != "https":
+        raise QdrantConfigurationError(
+            "Qdrant Cloud URLs must use https."
+        )
+
+    return ResolvedQdrantConfig(
+        url=raw_url,
+        api_key=api_key or None,
+        timeout_seconds=settings.qdrant_timeout_seconds,
+        prefer_grpc=False,
+    )
+
+
+def get_qdrant_client(settings: Settings | None = None) -> QdrantClient:
+    resolved = resolve_qdrant_config(settings)
     return QdrantClient(
-        url=settings.qdrant_url,
-        timeout=settings.qdrant_timeout_seconds,
+        url=resolved.url,
+        api_key=resolved.api_key,
+        timeout=resolved.timeout_seconds,
+        prefer_grpc=resolved.prefer_grpc,
     )
 
 
@@ -34,7 +94,7 @@ def ensure_collection(client: QdrantClient | None = None) -> None:
     """Create the collection if it does not already exist."""
     settings = get_settings()
     if client is None:
-        client = get_qdrant_client()
+        client = get_qdrant_client(settings)
 
     collections = [c.name for c in client.get_collections().collections]
     if settings.qdrant_collection not in collections:
@@ -59,7 +119,7 @@ def upsert_vectors(
     """Batch upsert vectors with payloads into Qdrant."""
     settings = get_settings()
     if client is None:
-        client = get_qdrant_client()
+        client = get_qdrant_client(settings)
 
     points = [
         models.PointStruct(id=uid, vector=vec, payload=pay)
@@ -83,7 +143,7 @@ def delete_vectors_by_metadata(
     """
     settings = get_settings()
     if client is None:
-        client = get_qdrant_client()
+        client = get_qdrant_client(settings)
 
     conditions = [
         models.FieldCondition(
@@ -114,7 +174,7 @@ def search_vectors(
     """Search for similar vectors in Qdrant."""
     settings = get_settings()
     if client is None:
-        client = get_qdrant_client()
+        client = get_qdrant_client(settings)
 
     qdrant_filter = _build_qdrant_filter(filters)
 
@@ -136,7 +196,7 @@ def count_vectors(
     """Count points matching the given metadata filters."""
     settings = get_settings()
     if client is None:
-        client = get_qdrant_client()
+        client = get_qdrant_client(settings)
 
     result = client.count(
         collection_name=settings.qdrant_collection,
@@ -155,7 +215,7 @@ def sample_payloads(
     """Return a small payload sample for debugging filter behavior."""
     settings = get_settings()
     if client is None:
-        client = get_qdrant_client()
+        client = get_qdrant_client(settings)
 
     points, _ = client.scroll(
         collection_name=settings.qdrant_collection,
@@ -260,3 +320,8 @@ def _sanitize_payload_for_diagnostics(payload: dict[str, Any]) -> dict[str, Any]
             "uri",
         )
     }
+
+
+def _qdrant_requires_api_key(host: str) -> bool:
+    """Return True when the host looks like a managed Qdrant deployment."""
+    return host.endswith("cloud.qdrant.io") or "qdrant.tech" in host

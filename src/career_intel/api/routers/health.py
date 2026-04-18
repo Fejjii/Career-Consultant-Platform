@@ -10,6 +10,7 @@ import structlog
 from fastapi import APIRouter
 
 from career_intel.config import get_settings
+from career_intel.storage.qdrant_store import get_qdrant_client
 from career_intel.schemas.api import (
     HealthResponse,
     ProviderAuthStatusResponse,
@@ -59,10 +60,8 @@ async def readiness() -> ReadyResponse:
 
     # --- Qdrant ---
     try:
-        from qdrant_client import QdrantClient
-
         t0 = time.monotonic()
-        qc = QdrantClient(url=settings.qdrant_url, timeout=3)
+        qc = get_qdrant_client(settings)
         qc.get_collections()
         details.append(ReadyDetail(
             name="qdrant",
@@ -115,9 +114,7 @@ async def system_status() -> SystemStatusResponse:
     """Return lightweight status for UI smoke tests."""
     settings = get_settings()
     try:
-        from qdrant_client import QdrantClient
-
-        client = QdrantClient(url=settings.qdrant_url, timeout=2)
+        client = get_qdrant_client(settings)
         collections = {c.name for c in client.get_collections().collections}
         if settings.qdrant_collection not in collections:
             return SystemStatusResponse(

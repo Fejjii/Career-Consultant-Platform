@@ -125,12 +125,39 @@ def _qdrant_requires_api_key(url: str) -> bool:
     return host.endswith("cloud.qdrant.io") or "qdrant.tech" in host
 
 
+def _qdrant_url_validation_message(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return (
+            "Retrieval unavailable because QDRANT_URL must be a full http(s) URL, for example "
+            "https://your-cluster.cloud.qdrant.io."
+        )
+    host = (parsed.hostname or "").strip().lower()
+    if host in {"0.0.0.0", "::"}:
+        return (
+            "Retrieval unavailable because QDRANT_URL uses a bind address. "
+            "Use the actual Qdrant hostname instead of 0.0.0.0/::."
+        )
+    if _qdrant_requires_api_key(url) and parsed.scheme != "https":
+        return "Retrieval unavailable because Qdrant Cloud URLs must use https."
+    return None
+
+
 def resolve_qdrant_config(
     *,
     secrets: Mapping[str, object] | None = None,
 ) -> QdrantConfigResolution:
     """Resolve Qdrant settings and return an actionable availability message."""
     qdrant_url = _secret_value("QDRANT_URL", secrets=secrets) or _LOCAL_QDRANT_DEFAULT_URL
+    validation_message = _qdrant_url_validation_message(qdrant_url)
+    if validation_message:
+        return QdrantConfigResolution(
+            url=qdrant_url,
+            api_key=None,
+            requires_api_key=False,
+            retrieval_available=False,
+            message=validation_message,
+        )
 
     qdrant_api_key = _secret_value("QDRANT_API_KEY", secrets=secrets)
     requires_key = _qdrant_requires_api_key(qdrant_url)

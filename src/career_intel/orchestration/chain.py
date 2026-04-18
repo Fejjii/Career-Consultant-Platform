@@ -207,6 +207,7 @@ async def run_turn(
     # --- Step 4: Rewrite + Retrieve (only when the router asks for RAG evidence) ---
     from career_intel.rag.query_preprocessor import normalize_query_for_retrieval
     from career_intel.rag.retriever import (
+        RetrievalBackendUnavailableError,
         assess_evidence_strength,
         assess_source_consistency,
         build_query_profile,
@@ -229,6 +230,7 @@ async def run_turn(
     retrieved_sources: list[str] = []
     query_profile = None
     retriever_called = False
+    retrieval_unavailable_message: str | None = None
     if intent == "domain_specific":
         retriever_called = True
         logger.info(
@@ -270,36 +272,46 @@ async def run_turn(
             essential_optional_query=query_profile.essential_optional_query,
             salient_concepts=list(query_profile.salient_concepts),
         )
-        chunks = await retrieve_chunks(
-            query=rewritten,
-            filters=filters,
-            settings=settings,
-            detected_source_override=detected_source,
-            query_profile_override=query_profile,
-        )
-        source_consistent, source_consistency_reason, retrieved_sources = assess_source_consistency(
-            chunks,
-            detected_source=detected_source,
-        )
-        evidence_strength, path_reason = assess_evidence_strength(
-            chunks,
-            settings=settings,
-            detected_source=detected_source,
-        )
-        force_rag, force_reason = should_force_rag(
-            chunks,
-            settings=settings,
-            detected_source=detected_source,
-        )
-        logger.info(
-            "retriever_result",
-            called=True,
-            retrieved_chunks=len(chunks),
-            detected_source=detected_source,
-            selected_esco_doc_types=[
-                chunk.metadata.esco_doc_type for chunk in chunks if chunk.metadata.esco_doc_type
-            ],
-        )
+        try:
+            chunks = await retrieve_chunks(
+                query=rewritten,
+                filters=filters,
+                settings=settings,
+                detected_source_override=detected_source,
+                query_profile_override=query_profile,
+            )
+            source_consistent, source_consistency_reason, retrieved_sources = assess_source_consistency(
+                chunks,
+                detected_source=detected_source,
+            )
+            evidence_strength, path_reason = assess_evidence_strength(
+                chunks,
+                settings=settings,
+                detected_source=detected_source,
+            )
+            force_rag, force_reason = should_force_rag(
+                chunks,
+                settings=settings,
+                detected_source=detected_source,
+            )
+            logger.info(
+                "retriever_result",
+                called=True,
+                retrieved_chunks=len(chunks),
+                detected_source=detected_source,
+                selected_esco_doc_types=[
+                    chunk.metadata.esco_doc_type for chunk in chunks if chunk.metadata.esco_doc_type
+                ],
+            )
+        except RetrievalBackendUnavailableError as exc:
+            retrieval_unavailable_message = str(exc)
+            path_reason = "retrieval_backend_unavailable"
+            logger.warning(
+                "retriever_unavailable",
+                query_preview=user_query[:80],
+                detected_source=detected_source,
+                error=retrieval_unavailable_message,
+            )
 
     if not retriever_called:
         logger.info(
@@ -438,6 +450,12 @@ async def run_turn(
         use_cv=use_cv,
         answer_length=answer_length,
     )
+    if retrieval_unavailable_message and answer_source == "llm_fallback":
+        reply = (
+            "Retrieval is temporarily unavailable, so this answer uses general reasoning instead "
+            "of indexed sources.\n\n"
+            + reply
+        )
     turn_usage = merge_token_usages(router_usage, synth_usage)
 
     logger.info(

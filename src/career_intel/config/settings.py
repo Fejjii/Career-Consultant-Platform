@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     # --- Vector DB ---
     qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: SecretStr | None = None
     qdrant_collection: str = "career_intel"
     qdrant_timeout_seconds: float = 120.0
 

@@ -13,7 +13,13 @@ from career_intel.llm import get_chat_llm
 from career_intel.rag.embeddings import get_embeddings
 from career_intel.rag.rerank import rerank_chunks, select_rerank_profile
 from career_intel.schemas.domain import ChunkMetadata, RetrievedChunk
-from career_intel.storage.qdrant_store import count_vectors, sample_payloads, search_vectors
+from career_intel.storage.qdrant_store import (
+    QdrantConfigurationError,
+    count_vectors,
+    get_qdrant_client,
+    sample_payloads,
+    search_vectors,
+)
 
 logger = structlog.get_logger()
 
@@ -118,6 +124,10 @@ _ESCO_CONCEPT_STOPWORDS = frozenset(
 _SHORT_CONCEPTS = frozenset({"ai", "bi", "ml", "sql", "etl", "ui", "ux"})
 
 
+class RetrievalBackendUnavailableError(RuntimeError):
+    """Raised when retrieval cannot reach the configured vector backend."""
+
+
 def _safe_preview_for_console(text: str, limit: int = 100) -> str:
     """Return an ASCII-safe preview for development console logging."""
     preview = text[:limit]
@@ -190,6 +200,16 @@ async def retrieve_chunks(
     eff_threshold = (
         settings.rag_weak_evidence_threshold if score_threshold is None else score_threshold
     )
+    try:
+        client = get_qdrant_client(settings)
+    except Exception as exc:
+        logger.warning(
+            "retrieval_backend_unavailable",
+            stage="client_init",
+            query_preview=query[:80],
+            error=str(exc)[:300],
+        )
+        raise RetrievalBackendUnavailableError(_friendly_qdrant_error(exc)) from exc
 
     normalized_query = normalize_query(query)
     detected_source = detected_source_override or detect_query_source(normalized_query)
@@ -211,9 +231,11 @@ async def retrieve_chunks(
     if detected_source:
         payload_sample = None
         try:
-            matching_filtered_candidates = count_vectors(retrieval_filters)
+            matching_filtered_candidates = count_vectors(retrieval_filters, client=client)
             payload_sample = _sanitize_payload_sample(
-                sample_payloads(retrieval_filters, limit=1)[0] if matching_filtered_candidates else None
+                sample_payloads(retrieval_filters, limit=1, client=client)[0]
+                if matching_filtered_candidates
+                else None
             )
         except Exception as exc:  # pragma: no cover - defensive live-system guard
             logger.warning(
@@ -250,7 +272,23 @@ async def retrieve_chunks(
         query_variants.append(relation_variant)
 
     vectors = get_embeddings(query_variants, settings=settings)
-    scored_points = _search_merged(vectors=vectors, top_k=initial_top_k, filters=retrieval_filters)
+    try:
+        scored_points = _search_merged(
+            vectors=vectors,
+            top_k=initial_top_k,
+            filters=retrieval_filters,
+            client=client,
+        )
+    except Exception as exc:
+        logger.warning(
+            "retrieval_backend_unavailable",
+            stage="vector_search",
+            query_preview=query[:80],
+            detected_source=detected_source,
+            applied_filter=retrieval_filters,
+            error=str(exc)[:300],
+        )
+        raise RetrievalBackendUnavailableError(_friendly_qdrant_error(exc)) from exc
     if detected_source:
         logger.info(
             "retrieval_source_filtered_candidates",
@@ -269,7 +307,22 @@ async def retrieve_chunks(
             applied_filter=retrieval_filters,
             reason="no_results_after_filter",
         )
-        scored_points = _search_merged(vectors=vectors, top_k=initial_top_k, filters=None)
+        try:
+            scored_points = _search_merged(
+                vectors=vectors,
+                top_k=initial_top_k,
+                filters=None,
+                client=client,
+            )
+        except Exception as exc:
+            logger.warning(
+                "retrieval_backend_unavailable",
+                stage="vector_search_filter_fallback",
+                query_preview=query[:80],
+                detected_source=detected_source,
+                error=str(exc)[:300],
+            )
+            raise RetrievalBackendUnavailableError(_friendly_qdrant_error(exc)) from exc
         filter_fallback_used = True
 
     if scored_points:
@@ -763,11 +816,12 @@ def _search_merged(
     vectors: list[list[float]],
     top_k: int,
     filters: dict[str, Any] | None,
+    client: Any,
 ) -> list[Any]:
     """Search each query vector and merge points by max score."""
     by_id: dict[str, Any] = {}
     for vector in vectors:
-        results = search_vectors(query_vector=vector, top_k=top_k, filters=filters)
+        results = search_vectors(query_vector=vector, top_k=top_k, filters=filters, client=client)
         for point in results:
             point_id = str(point.id)
             if point_id not in by_id or getattr(point, "score", 0.0) > getattr(by_id[point_id], "score", 0.0):
@@ -775,3 +829,10 @@ def _search_merged(
     merged = list(by_id.values())
     merged.sort(key=lambda p: getattr(p, "score", 0.0), reverse=True)
     return merged[:top_k]
+
+
+def _friendly_qdrant_error(exc: Exception) -> str:
+    """Return a safe retrieval failure message for fallback flows."""
+    if isinstance(exc, QdrantConfigurationError):
+        return str(exc)
+    return "Retrieval is temporarily unavailable because the Qdrant endpoint could not be reached."

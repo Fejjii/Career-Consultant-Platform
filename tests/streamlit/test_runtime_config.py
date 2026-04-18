@@ -42,3 +42,11 @@ def test_resolve_qdrant_uses_local_default_when_unset(monkeypatch) -> None:
     assert resolved.retrieval_available is True
     assert resolved.url == "http://localhost:6333"
     assert resolved.message is None
+
+
+def test_resolve_qdrant_rejects_bind_address() -> None:
+    """Bind addresses like 0.0.0.0 should be rejected for client-side use."""
+    resolved = runtime_config.resolve_qdrant_config(secrets={"QDRANT_URL": "http://0.0.0.0:6333"})
+
+    assert resolved.retrieval_available is False
+    assert "bind address" in str(resolved.message).lower()
