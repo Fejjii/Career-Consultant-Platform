@@ -6,6 +6,7 @@ This module lets the Streamlit app reuse backend orchestration without HTTP.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
